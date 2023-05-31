@@ -1,0 +1,2004 @@
+---
+title: "RMS Hi-C Data Analysis"
+author: Meng Wang
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+always_allow_html: true
+output:
+    html_document
+
+---
+<!--- adding banner
+<img src="/home/gdstantonlab/lab/lab.jpg" width = "200" height = "200" style="position:absolute;top:30px;right:50px;" />
+<style>
+p.caption {
+  font-size: 1.2em;
+}
+</style>
+-->
+
+```{r loadLibrary,  include=FALSE, echo=FALSE, messages = FALSE, warnings=FALSE}
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(dplyr)
+library(hrbrthemes)
+library(gt)
+theme_set(theme_bw())
+theme_update(
+    plot.title = element_text(hjust = 0.5)
+)
+library(knitr)
+library(grid)
+library(gridExtra)
+get_legend <- function(myggplot) {
+    tmp <- ggplot_gtable(ggplot_build(myggplot))
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-aox")
+    legend <- tmp$grobs[[leg]]
+    return(legend)
+}
+library(gt)
+# library(reticulate)
+
+peak_comparison_plot <- function(sub, factor, res, title = "") {
+    orig <- read.table(list.files(paste(sub, "_", res, sep = ""),
+        pattern = paste("*", factor, "_compartment_by_chr_", res, "*", sep = ""),
+        ignore.case = T, full.names = T
+    ))
+    under_peak <- read.table(list.files(paste(sub, "_", res, sep = ""),
+        pattern = paste("*", factor, "_compartment_underpeak_", res, "*", sep = ""),
+        ignore.case = T, full.names = T
+    ))
+
+    # orig[,2] <- orig[,2]/ orig[,4]
+    # orig[,3] <- orig[,3]/ orig[,5]
+    orig <- orig[, 1:3]
+    # under_peak[,2] <- under_peak[,2]/under_peak[,4]
+    # under_peak[,3] <- under_peak[,3]/under_peak[,5]
+    under_peak <- under_peak[, 1:3]
+    orig$type <- factor
+    under_peak$type <- "UP"
+    colnames(orig)[1:3] <- colnames(under_peak)[1:3] <- c("chr", "compA", "compB")
+
+    df <- rbind(orig, under_peak) %>% melt()
+    df$chr <- factor(df$chr, levels = orig[, 1])
+    df$type <- factor(df$type, levels = c(factor, "UP"))
+    ggplot(data = df, aes(x = type, y = value, fill = variable)) +
+        geom_bar(position = "fill", stat = "identity") +
+        # geom_hline(yintercept=0.5, linetype = "dashed", color = "lightgrey", size = 1.3) +
+        facet_wrap(~chr, scales = "free_x") +
+        ylab("Proportion") +
+        xlab("") +
+        ggtitle(title) +
+        scale_fill_manual(
+            values = c("#999999", "#E69F00"),
+            name = "Compartments",
+            labels = c("A", "B")
+        )
+}
+
+get_legend <- function(myggplot) {
+    tmp <- ggplot_gtable(ggplot_build(myggplot))
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-aox")
+    legend <- tmp$grobs[[leg]]
+    return(legend)
+}
+```
+
+```{r setup, eval=TRUE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE)
+# Sys.setenv("DISPLAY" = "localhost:46.0")
+# use_python("~/.conda/envs/hic/bin/python")
+# use_condaenv(condaenv = "hic", conda = "/gpfs0/export/apps/easybuild/software/Miniconda3/4.7.10/condabin/conda")
+# module load rstudio/1.4.1717 R/4.1.0
+# > getwd()
+# [1] "/gpfs0/home2/gdstantonlab/mxw010/Data/SPICE-C"
+# starting hgd server
+# library(httpgd)
+# hgd()
+```
+
+```{r setup_python, include = FALSE}
+library(reticulate)
+use_condaenv("cooltools")
+use_python("/home/gdstantonlab/mxw010/.conda/envs/cooltools/bin/python")
+py_config()
+```
+
+```{python}
+import warnings
+warnings.filterwarnings("ignore")
+import sys, glob, os, re
+import numpy as np
+import pandas as pd
+# import open2c libraries
+import bioframe
+import cooler
+import cooltools
+import pybedtools
+import matplotlib.pyplot as plt
+from matplotlib import colors
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from matplotlib.colors import Normalize, LogNorm
+from matplotlib import ticker
+import seaborn as sns
+```
+
+
+# Exponential decay
+
+```{python exp_decay}
+resolution=10000
+clr = cooler.Cooler('/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/cools/RH4.mcool::/resolutions/'+str(resolution))
+
+hg38_chromsizes = bioframe.fetch_chromsizes('hg38')
+hg38_cens = bioframe.fetch_centromeres('hg38')
+# create a view with chromosome arms using chromosome sizes and definition of centromeres
+hg38_arms = bioframe.make_chromarms(hg38_chromsizes,  hg38_cens)
+
+# select only those chromosomes available in cooler
+hg38_arms = hg38_arms[hg38_arms.chrom.isin(clr.chromnames)].reset_index(drop=True)
+
+hg38 = pd.DataFrame({'chrom': hg38_chromsizes.index.tolist(),'start': 0, 'end': hg38_chromsizes, 'name': hg38_chromsizes.index.tolist()})
+hg38 = hg38[hg38.chrom.isin(clr.chromnames)].reset_index(drop=True)
+
+cvd = cooltools.expected_cis(
+    clr=clr,
+    view_df=hg38,
+    smooth=False,
+    aggregate_smoothed=False,
+    nproc=4, #if you do not have multiple cores available, set to 1
+    clr_weight_name='sweight'
+)
+cvd['s_bp'] = cvd['dist']* resolution
+
+cvd_chr = cooltools.expected_cis(
+    clr=clr,
+    view_df=hg38,
+    smooth=False,
+    aggregate_smoothed=False,
+    nproc=4, #if you do not have multiple cores available, set to 1
+    clr_weight_name='weight'
+)
+
+cvd_chr['s_bp'] = cvd_chr['dist']* resolution
+
+ncol = 6
+nrow = len(hg38['name'])// ncol + int(len(hg38['name']) % ncol != 0)
+
+j=0
+k=0
+f, ax = plt.subplots(nrow, ncol, figsize=(25,25))
+
+for region in hg38['name']:
+    _ = ax[j,k].loglog(
+        cvd_chr['s_bp'].loc[cvd_chr['region1']==region],
+        cvd_chr['balanced.avg'].loc[cvd_chr['region1']==region],
+    )
+    _ = ax[j,k].set(
+        title = region,
+        xlabel= '',
+        ylabel='')
+    #ax[j,k].set_aspect(1.0)
+    #ax[j,k].grid(lw=0.5)
+    k += 1
+    if k == ncol:
+        k=0
+        j +=1
+
+_ = f.suptitle("Distance vs Contract Frequency per Chr (RH4)", size=30)
+f.tight_layout()
+#plt.show()
+plt.savefig('exp_decay.pdf')
+```
+
+chrY has been removed from future analysis since RH4 cell line is a female only celll ine.
+
+# Is CNV based normalization needed for Hi-C?
+```{python nromalization_comp, fig.height=5, fig.width=5}
+resolution=10000
+clr = cooler.Cooler('/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/cools/RH4.mcool::/resolutions/'+str(resolution))
+weight = clr.bins()[:]['weight'].values
+sweight = clr.bins()[:]['sweight'].values
+f, ax = plt.subplots(1,1, figsize=(12,12))
+_ = ax.scatter(weight,sweight, s = 1)
+_ = ax.set(title = "Normalized Bin Values Comparison (RH4)",
+       xlabel = "ICE",
+       ylabel = "CNV BASED")
+plt.show()
+#plt.savefig('norm_comp.png')
+```
+
+# Compartment Analysis
+
+## Technical details
+
+<details>
+  <summary>Click for Details</summary>
+
+- Data are aligned with `bwa mem -SP5M  -t 10` (version .7.17-r1188).
+
+- QC parsed, and converted to cool format  with pairtools/cooltools.
+
+- ICE normalization applied with cooltools.
+
+- Compartments called with`cooltools call-compartments` at 100kb resolution using H3K27ac as reference track.
+
+- Scripts in /home/gdstantonlab/mxw010/Data/SPICE-C/scripts.
+
+- and /home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/heatmap.sh.
+
+- TADs are called with TopDom at 50kb resolution.
+
+- Version of python libraries:
+
+```{bash, eval = FALSE}
+ml Miniconda3/4.7.10
+conda activate hic
+python --version
+pairtools --version
+cooltools --version
+hicexplorer --version
+```
+</details>
+
+## Cell Line Comparison:
+
+## Compartment Calls Across Cell Lines
+
+### Saddle Plot
+```{bash saddle_plot_bash, eval = FALSE, include = FALSE}
+ml ucsc/default
+cooltools call-compartments --reference-track ../k27ac_100kb/RH4_K27ac_100kb.bedgraph \
+ --aigwig -o RH4_100kb ../../cools/RH4.mcool::/resolutions/100000
+cooltools compute-expected -o RH4_100kb_expected_tracks.tsv ../../cools/RH4.mcool::/resolutions/100000
+cooltools compute-saddle -o RH4_saddle_100kb --qrange 0.02 0.98 --fig png ../../cools/RH4.mcool::/resolutions/100000 \
+RH4_100kb.cis.vecs.tsv RH4_100kb_expected_tracks.tsv
+```
+
+```{python saddle_plot}
+# script: /home/gdstantonlab/mxw010/Data/SPICE-C/analysis/saddleplot_4_celllines.py
+vmin=0.5
+vmax=2
+#https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8446342/pdf/41592_2021_Article_1248.pdf
+#figure 3. Description in methods
+from matplotlib import ticker
+import matplotlib.pyplot as plt
+from matplotlib import colors
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from matplotlib.colors import Normalize, LogNorm
+from matplotlib import ticker
+import seaborn as sns
+import cooler
+import pandas as pd
+import numpy as np
+import cooltools
+class MinOneMaxFormatter(ticker.LogFormatter):
+        def set_locs(self, locs=None):
+            self._sublabels = set([vmin % 10 * 10, vmax % 10, 1])
+        def __call__(self, x, pos=None):
+            if x not in [vmin, 1, vmax]:
+                return ""
+            else:
+                return "{x:g}".format(x=x)
+
+def saddle_heatmap(cell, ax, label, resolution=100000, nbins = 95, vmin=0.5, vmax=2, qrange = (0.025,0.975), colorbar = False, clabel=""):
+    clr = cooler.Cooler('/home/gdstantonlab/mxw010/Data/SPICE-C/'+ cell + '/cools/' + cell + '.mcool::/resolutions/' +str(resolution))
+    eigenvector_track=pd.read_csv('/home/gdstantonlab/mxw010/Data/SPICE-C/' + cell + '/Compartments/K27ac_100kb/' + cell + '_100kb.cis.vecs.tsv', header=0, sep="\t")[['chrom','start','end','E1']]
+    view_df = pd.DataFrame({'chrom': clr.chromnames,
+                            'start': 0,
+                            'end': clr.chromsizes.values,
+                            'name': clr.chromnames})
+    #digitize first
+    digitized, binedges = cooltools.digitize(eigenvector_track,nbins,qrange = qrange)
+    cvd = cooltools.expected_cis(clr=clr)
+    interaction_sum, interaction_count =  cooltools.saddle(
+                                                   clr,
+                                                   cvd,
+                                                   digitized,
+                                                   'cis',
+                                                   view_df=view_df)
+    saddledata = interaction_sum/interaction_count
+    x = digitized[digitized.columns[3]].values.astype(int).copy()
+    x = x[(x > -1) & (x < len(binedges) + 1)]
+    hist = np.bincount(x, minlength=len(binedges) + 1)
+    if qrange is not None:
+        lo, hi = qrange
+        binedges = np.linspace(lo, hi, nbins + 1)
+    # Histogram and saddledata are flanked by outlier bins
+    n = (interaction_sum/interaction_count).shape[0]
+    X, Y = np.meshgrid(binedges, binedges)
+    C = saddledata
+    BB_strength = round(saddledata[0,int(np.floor(0.2*n))]/saddledata[0,-int(np.floor(0.2*n))],2)
+    AA_strength = round(saddledata[-1,-int(np.floor(0.2*n))]/saddledata[-1,int(np.floor(0.2*n))],2)
+    _ = ax.text(0.08,0.18, BB_strength, size=25)
+    _ = ax.text(0.75,0.92, AA_strength, size=25)
+    if (n - nbins) == 2:
+        C = C[1:-1, 1:-1]
+        hist = hist[1:-1]
+    norm = LogNorm(vmin=vmin, vmax=vmax)
+    heatmap_kws = dict(cmap="coolwarm", rasterized=True)
+    c =  ax.pcolormesh(X, Y, C, norm=norm, **heatmap_kws)
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(hi, lo)
+    ax.yaxis.set_visible(False)
+    ax.xaxis.set_visible(False)
+    ax.set_title(cell)
+    if colorbar:
+        return(c)
+
+fig = plt.figure(dpi=300, clear = True)
+gs0 = GridSpec(1, 2, figure=fig, width_ratios = [1,0.1], hspace=0.5)
+gs00 = GridSpecFromSubplotSpec(2, 2, subplot_spec=gs0[0], hspace=0.1,wspace=0.1)
+
+ax1 = fig.add_subplot(gs00[0,0])
+ax2 = fig.add_subplot(gs00[0,1])
+ax3 = fig.add_subplot(gs00[1,0])
+ax4 = fig.add_subplot(gs00[1,1])
+
+cell_lines = ['RH4', 'RH30', 'RD', 'CTR']
+for i, ax in enumerate(fig.axes):
+    cell = cell_lines[i]
+    print('making figure for cell line ' + cell +"...")
+    if i==0:
+        item = saddle_heatmap(cell, ax, label=cell, colorbar=True)
+        _ = ax.text(0.08,0.28, "B-a", size=30)
+        _ = ax.text(0.08,0.72, "B-b", size=30)
+        _ = ax.text(0.77,0.28, "A-a", size=30)
+        _ = ax.text(0.77,0.75, "A-b", size=30)
+    elif i <= 3:
+        saddle_heatmap(cell, ax, label=cell)
+
+ax5 = fig.add_subplot(gs0[1])
+norm = LogNorm(vmin=vmin, vmax=vmax)
+_ = fig.colorbar(item, cax=ax5, format=MinOneMaxFormatter(),norm = norm, ticks=[0.5,1,2])
+ax5.yaxis.set_minor_formatter(MinOneMaxFormatter())
+plt.savefig('new_saddle_plot.pdf')
+#plt.show()
+```
+
+```{r eval = FALSE, include= FALSE}
+# run: ./analysis/saddleplot_4_celllines.py
+knitr::include_graphics("/home/gdstantonlab/mxw010/Data/SPICE-C/analysis/new_saddle_plot.pdf")
+# knitr::include_graphics("/home/gdstantonlab/mxw010/Data/SPICE-C/RH30/Compartments/K27ac_100kb/RH30_saddle_100kb.png")
+# knitr::include_graphics("/home/gdstantonlab/mxw010/Data/SPICE-C/RD/Compartments/K27ac_100kb/RD_saddle_100kb.png")
+# knitr::include_graphics("/home/gdstantonlab/mxw010/Data/SPICE-C/CTR/Compartments/K27ac_100kb/CTR_saddle_100kb.png")
+```
+
+## Breakdown of TF/HM Association with Compartments per Chr {.tabset}
+
+```{bash Comp_Plot, eval =FALSE, include = FALSE}
+/home/gdstantonlab/mxw010/Data/SPICE-C/analysis/Compartment_plot.sh
+```
+
+### RH4
+
+```{r overall_RH4, fig.height = 10, fig.width = 10, fig.align="center"}
+# shell script to generate those files are in:
+# ~/Data/SPICE-C/RH4/Compartments/heatmap.sh
+setwd("/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/K27ac_100kb/")
+k27 <- read.table("H3K27ac_compartment_by_chr_100kb.bed")
+p3f <- read.table("P3F_compartment_by_chr_100kb.bed")
+k9me3 <- read.table("H3K9me3_compartment_by_chr_100kb.bed")
+myod <- read.table("MYOD_compartment_by_chr_100kb.bed")
+gc <- read.table("gcContent_compartment_by_chr_100kb.bed")
+
+# k27[,2] <- k27[,2]/k27[,4]
+# k27[,3] <- k27[,3]/k27[,5]
+k27 <- k27[, 1:3]
+# p3f[,2] <- p3f[,2]/p3f[,4]
+# p3f[,3] <- p3f[,3]/p3f[,5]
+p3f <- p3f[, 1:3]
+
+# k9me3[,2] <- k9me3[,2]/k9me3[,4]
+# k9me3[,3] <- k9me3[,3]/k9me3[,5]
+k9me3 <- k9me3[, 1:3]
+
+# myod[,2] <- myod[,2]/myod[,4]
+# myod[,3] <- myod[,3]/myod[,5]
+myod <- myod[, 1:3]
+
+# gc[,2] <- gc[,2]/gc[,4]
+# gc[,3] <- gc[,3]/gc[,5]
+gc <- gc[, 1:3]
+
+k27$factor <- "H3K27ac"
+p3f$factor <- "PAX3-FOXO1"
+k9me3$factor <- "H3K9me3"
+myod$factor <- "MYOD"
+gc$factor <- "GC"
+colnames(k27)[1:3] <- colnames(p3f)[1:3] <- colnames(k9me3)[1:3] <- colnames(myod)[1:3] <- colnames(gc)[1:3] <- c("chr", "CompA", "CompB")
+
+df <- rbind(k27, p3f, k9me3, myod, gc)
+# df[,2:3] <- df[,2:3]/rowSums(df[,2:3])
+chrOrder <- c(paste("chr", 1:22, sep = ""), "chrX", "chrY")
+
+df$chr <- factor(df$chr, levels = chrOrder)
+
+pdf("/home/gdstantonlab/mxw010/Data/SPICE-C/figures/Compartment/RH4_compartment_by_chr_k9_merged.pdf")
+melt(df) %>%
+    ggplot(aes(x = factor, y = value, fill = variable)) +
+    geom_bar(position = "dodge", stat = "identity") +
+    facet_wrap(~chr) +
+    ylab("Avg Intensity") +
+    xlab("Factors") +
+    scale_fill_manual(
+        values = c("#63a7ff", "black"),
+        name = "Compartments",
+        labels = c("A", "B")
+    ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+# original color: c("#999999", "#E69F00")
+dev.off()
+```
+
+
+
+### RH30
+
+```{r overall_RH30, fig.height = 10, fig.width = 10, fig.align="center"}
+# shell script to generate those files are in:
+# ~/Data/SPICE-C/RH4/Compartments/heatmap.sh
+setwd("/home/gdstantonlab/mxw010/Data/SPICE-C/RH30/Compartments/K27ac_100kb/")
+k27 <- read.table("H3K27ac_compartment_by_chr_100kb.bed")
+p3f <- read.table("P3F_compartment_by_chr_100kb.bed")
+k9me3 <- read.table("H3K9me3_compartment_by_chr_100kb.bed")
+myod <- read.table("MYOD_compartment_by_chr_100kb.bed")
+gc <- read.table("gcContent_compartment_by_chr_100kb.bed")
+
+# k27[,2] <- k27[,2]/k27[,4]
+# k27[,3] <- k27[,3]/k27[,5]
+k27 <- k27[, 1:3]
+# p3f[,2] <- p3f[,2]/p3f[,4]
+# p3f[,3] <- p3f[,3]/p3f[,5]
+p3f <- p3f[, 1:3]
+
+# k9me3[,2] <- k9me3[,2]/k9me3[,4]
+# k9me3[,3] <- k9me3[,3]/k9me3[,5]
+k9me3 <- k9me3[, 1:3]
+
+# myod[,2] <- myod[,2]/myod[,4]
+# myod[,3] <- myod[,3]/myod[,5]
+myod <- myod[, 1:3]
+
+# gc[,2] <- gc[,2]/gc[,4]
+# gc[,3] <- gc[,3]/gc[,5]
+gc <- gc[, 1:3]
+
+k27$factor <- "H3K27ac"
+p3f$factor <- "PAX3-FOXO1"
+k9me3$factor <- "H3K9me3"
+myod$factor <- "MYOD"
+gc$factor <- "GC"
+colnames(k27)[1:3] <- colnames(p3f)[1:3] <- colnames(k9me3)[1:3] <- colnames(myod)[1:3] <- colnames(gc)[1:3] <- c("chr", "CompA", "CompB")
+
+df <- rbind(k27, p3f, k9me3, myod, gc)
+# df[,2:3] <- df[,2:3]/rowSums(df[,2:3])
+chrOrder <- c(paste("chr", 1:22, sep = ""), "chrX", "chrY")
+
+df$chr <- factor(df$chr, levels = chrOrder)
+
+# pdf('/home/gdstantonlab/mxw010/Data/SPICE-C/figures/Compartment/RH30_compartment_by_chr.pdf')
+melt(df) %>%
+    ggplot(aes(x = factor, y = value, fill = variable)) +
+    geom_bar(position = "dodge", stat = "identity") +
+    facet_wrap(~chr) +
+    ylab("Avg Intensity") +
+    xlab("Factors") +
+    scale_fill_manual(
+        values = c("#63a7ff", "black"),
+        name = "Compartments",
+        labels = c("A", "B")
+    ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+# dev.off()
+```
+
+
+### RD
+
+```{r overall_RD, fig.height = 10, fig.width = 10, fig.align="center"}
+# shell script to generate those files are in:
+# ~/Data/SPICE-C/RH4/Compartments/heatmap.sh
+setwd("/home/gdstantonlab/mxw010/Data/SPICE-C/RD/Compartments/K27ac_100kb/")
+k27 <- read.table("H3K27ac_compartment_by_chr_100kb.bed")
+k9me3 <- read.table("H3K9me3_compartment_by_chr_100kb.bed")
+myod <- read.table("MYOD_compartment_by_chr_100kb.bed")
+gc <- read.table("gcContent_compartment_by_chr_100kb.bed")
+
+# k27[,2] <- k27[,2]/k27[,4]
+# k27[,3] <- k27[,3]/k27[,5]
+k27 <- k27[, 1:3]
+
+# k9me3[,2] <- k9me3[,2]/k9me3[,4]
+# k9me3[,3] <- k9me3[,3]/k9me3[,5]
+k9me3 <- k9me3[, 1:3]
+
+# myod[,2] <- myod[,2]/myod[,4]
+# myod[,3] <- myod[,3]/myod[,5]
+myod <- myod[, 1:3]
+
+# gc[,2] <- gc[,2]/gc[,4]
+# gc[,3] <- gc[,3]/gc[,5]
+gc <- gc[, 1:3]
+
+k27$factor <- "H3K27ac"
+k9me3$factor <- "H3K9me3"
+myod$factor <- "MYOD"
+gc$factor <- "GC"
+colnames(k27)[1:3] <- colnames(k9me3)[1:3] <- colnames(myod)[1:3] <- colnames(gc)[1:3] <- c("chr", "CompA", "CompB")
+
+df <- rbind(k27, k9me3, myod, gc)
+# df[,2:3] <- df[,2:3]/rowSums(df[,2:3])
+chrOrder <- c(paste("chr", 1:22, sep = ""), "chrX", "chrY")
+
+df$chr <- factor(df$chr, levels = chrOrder)
+
+# pdf('/home/gdstantonlab/mxw010/Data/SPICE-C/figures/Compartment/RD_compartment_by_chr.pdf')
+melt(df) %>%
+    ggplot(aes(x = factor, y = value, fill = variable)) +
+    geom_bar(position = "dodge", stat = "identity") +
+    facet_wrap(~chr) +
+    ylab("Avg Intensity") +
+    xlab("Factors") +
+    scale_fill_manual(
+        values = c("#63a7ff", "black"),
+        name = "Compartments",
+        labels = c("A", "B")
+    ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+# dev.off()
+```
+
+
+### CTR
+
+
+```{r overall_CTR, fig.height = 10, fig.width = 10, fig.align="center"}
+# shell script to generate those files are in:
+# ~/Data/SPICE-C/RH4/Compartments/heatmap.sh
+setwd("/home/gdstantonlab/mxw010/Data/SPICE-C/CTR/Compartments/K27ac_100kb/")
+k27 <- read.table("H3K27ac_compartment_by_chr_100kb.bed")
+k9me3 <- read.table("H3K9me3_compartment_by_chr_100kb.bed")
+myod <- read.table("MYOD_compartment_by_chr_100kb.bed")
+gc <- read.table("gcContent_compartment_by_chr_100kb.bed")
+
+# k27[,2] <- k27[,2]/k27[,4]
+# k27[,3] <- k27[,3]/k27[,5]
+k27 <- k27[, 1:3]
+
+# k9me3[,2] <- k9me3[,2]/k9me3[,4]
+# k9me3[,3] <- k9me3[,3]/k9me3[,5]
+k9me3 <- k9me3[, 1:3]
+
+# myod[,2] <- myod[,2]/myod[,4]
+# myod[,3] <- myod[,3]/myod[,5]
+myod <- myod[, 1:3]
+
+# gc[,2] <- gc[,2]/gc[,4]
+# gc[,3] <- gc[,3]/gc[,5]
+gc <- gc[, 1:3]
+
+k27$factor <- "H3K27ac"
+k9me3$factor <- "H3K9me3"
+myod$factor <- "MYOD"
+gc$factor <- "GC"
+colnames(k27)[1:3] <- colnames(k9me3)[1:3] <- colnames(myod)[1:3] <- colnames(gc)[1:3] <- c("chr", "CompA", "CompB")
+
+df <- rbind(k27, k9me3, myod, gc)
+# df[,2:3] <- df[,2:3]/rowSums(df[,2:3])
+chrOrder <- c(paste("chr", 1:22, sep = ""), "chrX", "chrY")
+
+df$chr <- factor(df$chr, levels = chrOrder)
+
+# pdf('/home/gdstantonlab/mxw010/Data/SPICE-C/figures/Compartment/CTR_compartment_by_chr.pdf')
+melt(df) %>%
+    ggplot(aes(x = factor, y = value, fill = variable)) +
+    geom_bar(position = "dodge", stat = "identity") +
+    facet_wrap(~chr) +
+    ylab("Avg Intensity") +
+    xlab("Factors") +
+    scale_fill_manual(
+        values = c("#63a7ff", "black"),
+        name = "Compartments",
+        labels = c("A", "B")
+    ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+# dev.off()
+```
+
+## Distribution of PC1 values for Each Factor
+```{python plot_dist}
+#add k9
+# np.sum(np.array(df[df['factor']=='P3F'].PC1)>0)
+df = pd.read_csv('result.txt',header=None,sep=" ")
+
+df.columns =['factor', 'PC1']
+f, ax = plt.subplots(1,1, figsize=(15,8))
+sns.set_theme(style="darkgrid")
+_ = sns.violinplot(x='PC1',y='factor', data=df, color='g', ax = ax)
+plt.show()
+```
+
+```{bash, eval = FALSE, include= FALSE}
+#cd /home/gdstantonlab/mxw010/Data/SPICE-C/analysis/switching
+#shell make_motif.sh
+```
+
+## Location of Binding Sites inside Each Compartment Bin
+```{python fraction_plot, include= FALSE, eval = FALSE}
+import warnings
+warnings.filterwarnings("ignore")
+import sys, glob, os, re
+import numpy as np
+import pandas as pd
+# import open2c libraries
+import pybedtools
+import matplotlib.pyplot as plt
+from matplotlib import colors
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from matplotlib.colors import Normalize, LogNorm
+from matplotlib import ticker
+import seaborn as sns
+from scipy.stats import kstest
+df = pd.read_csv("/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/K27ac_100kb/RH4_100kb.cis.vecs.tsv",
+                 sep="\t", header=0)[['chrom', 'start', 'end', 'E1']]
+comp = pybedtools.BedTool.from_dataframe(df[~pd.isna(df['E1'])])
+
+bed = pd.DataFrame(columns=['RH4', 'RH30', 'RD', 'CTR'], index=[
+                   'K27ac', 'MYOD', "P3F", 'MYCN'])
+# RH4 cell line
+bed.loc['K27ac', 'RH4'] = "/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH4/align_primary/chip/b6b42932-8417-4ffd-bcfe-6c4ce74da28f/call-call_peak/shard-0/execution/SEG0134_S2_L003_R1_001_val_1.srt.nodup_x_SEG0133_S1_L003_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+bed.loc['MYOD', 'RH4'] = "/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH4/RH4_IDR_Conservative.bed"
+bed.loc['P3F', 'RH4'] = "/home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4.bed"
+bed.loc['MYCN', 'RH4'] = "/home/gdstantonlab/mxw010/Data/SPICE-C/analysis/MYCN_RH4.bed"
+bed.loc['K27ac', 'RH30'] = "/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH30/align_primary/chip/2317294d-60c3-4998-9179-dc7da8c57608/call-call_peak/shard-0/execution/SEG0139_S7_L003_R1_001_val_1.srt.nodup_x_SEG0138_S6_L003_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+bed.loc['MYOD', 'RH30'] = "/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH30/RH30_IDR_Conservative.bed"
+bed.loc['P3F', 'RH30'] = "/home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH30.bed"
+bed.loc['K27ac', 'RD'] = "/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RD/align_primary/chip/c28a7a00-d332-4997-ab07-59eedba9146c/call-call_peak/shard-0/execution/SEG0144_S2_L004_R1_001_val_1.nodup_x_SEG0143_S1_L004_R1_001_val_1.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+bed.loc['MYOD', 'RD'] = "/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RD/RD_IDR_Conservative.bed"
+bed.loc['K27ac', 'CTR'] = "/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/SMS-CTR/align_primary/chip/3b89bbf5-421e-444a-87c5-3bbe9b11dbff/call-call_peak/shard-0/execution/SEG0149_S7_L004_R1_001_val_1.srt.nodup_x_SEG0148_S6_L004_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+bed.loc['MYOD', 'CTR'] = "/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/SMS-CTR/SMS-CTR_IDR_Conservative.bed"
+
+
+result = []
+
+for cell in bed.columns:
+    for factor in bed.index:
+        #print(factor, cell, bed.loc[factor,cell])
+        if not pd.isna(bed.loc[factor,cell]):
+            x = pybedtools.BedTool(bed.loc[factor,cell]).intersect(comp, wo=True).to_dataframe(
+                header=None).iloc[:, [0, 1, 2, -2]]
+            x.columns = ['chrom', 'start', 'end', 'PC1']
+            x['Compartment'] = ''
+            x['pos'] = ''
+            # assign compartment
+            for idx, row in x.iterrows():
+                x.loc[x.index[idx], 'Compartment'] = "A" if x['PC1'].iloc[idx] > 0 else "B"
+                x.loc[x.index[idx], 'pos'] = round(
+                    int(x['start'].iloc[idx])/100000 % 1, 4)
+            result_A = []
+            result_B = []
+            _, s_A = kstest(x[x['Compartment'] == 'A']['pos'].tolist(), 'uniform')
+            _, s_B = kstest(x[x['Compartment'] == 'B']['pos'].tolist(), 'uniform')
+            for idx, value in enumerate(np.arange(0,1.1, 0.1)):
+                if not idx == len(np.arange(0,1.1, 0.1)) - 1:
+                    temp = x[x['Compartment'] == "A"]['pos']
+                    result_A.append(len([x for x in temp if x > value and x <= np.arange(0,1.2, 0.1)[idx+1]])/len(temp))
+                    temp = x[x['Compartment'] == "B"]['pos']
+                    result_B.append(len([x for x in temp if x > value and x <= np.arange(0,1.2, 0.1)[idx+1]])/len(temp))
+            result.append([cell, factor, 'A', s_A]+ result_A)
+            result.append([cell, factor, 'B', s_B]+ result_B)
+
+
+dist = pd.DataFrame(result)
+dist.to_csv("binding_sites_dist.txt", index=False)
+
+n=19
+fig, ax = plt.subplots(1,1,figsize = (10, 5))
+ax.plot(np.arange(0.1,1.1,0.1),np.cumsum(dist.iloc[n,4:]))
+ax.plot(np.arange(0.1,1.1,0.1),np.arange(0.1,1.1,0.1), color='red', linestyle='--')
+plt.savefig('test.png')
+
+
+fig, ax = plt.subplots(1,1,figsize = (10, 5))
+ax.bar(dist.columns[4:], dist.iloc[0,4:], width=0.4)
+plt.savefig('test.png')
+
+pval = []
+for idx, eachrow in dist.iterrows():
+    _, s = kstest(eachrow[3:].tolist(), 'uniform')
+    pval.append(s)
+
+
+kstest(dist.iloc[0,3:].tolist(), 'uniform')
+
+def position_plot(bed, ax, title, ylabel, legend=False, custom_axis=False):
+    x = bed.intersect(comp, wo=True).to_dataframe(
+        header=None).iloc[:, [0, 1, 2, -2]]
+    x.columns = ['chrom', 'start', 'end', 'PC1']
+    x['Compartment'] = ''
+    x['pos'] = ''
+    # assign compartment
+    for idx, row in x.iterrows():
+        x.loc[x.index[idx], 'Compartment'] = "A" if x['PC1'].iloc[idx] > 0 else "B"
+        x.loc[x.index[idx], 'pos'] = round(
+            int(x['start'].iloc[idx])/100000 % 1, 4)
+    sns.set_theme(style="darkgrid")
+    sns.histplot(data=x, x="pos",  bins=10, multiple="dodge", shrink=0.8, hue='Compartment',
+                 stat='probability', common_norm=False, ax=ax, legend=legend)
+    ax.set(title=title, xlabel='', ylabel=ylabel)
+    labs = np.arange(0, 1.1, 0.5)
+    ax.set_xticks(labs)
+    if custom_axis:
+        ax.set_xticklabels([str(round(x*100))+'kb' for x in labs], rotation=90)
+    else:
+        ax.set_xticklabels('')
+    ax.axes.yaxis.set_ticks([])
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    return(x)
+
+
+bed = pd.DataFrame(columns=['RH4', 'RH30', 'RD', 'CTR'], index=[
+                   'K27ac', 'MYOD', "P3F", 'MYCN'])
+# RH4 cell line
+bed.loc['K27ac', 'RH4'] = "/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH4/align_primary/chip/b6b42932-8417-4ffd-bcfe-6c4ce74da28f/call-call_peak/shard-0/execution/SEG0134_S2_L003_R1_001_val_1.srt.nodup_x_SEG0133_S1_L003_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+bed.loc['MYOD', 'RH4'] = "/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH4/RH4_IDR_Conservative.bed"
+bed.loc['P3F', 'RH4'] = "/home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4.bed"
+bed.loc['MYCN', 'RH4'] = "/home/gdstantonlab/mxw010/Data/SPICE-C/analysis/MYCN_RH4.bed"
+bed.loc['K27ac', 'RH30'] = "/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH30/align_primary/chip/2317294d-60c3-4998-9179-dc7da8c57608/call-call_peak/shard-0/execution/SEG0139_S7_L003_R1_001_val_1.srt.nodup_x_SEG0138_S6_L003_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+bed.loc['MYOD', 'RH30'] = "/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH30/RH30_IDR_Conservative.bed"
+bed.loc['P3F', 'RH30'] = "/home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH30.bed"
+bed.loc['K27ac', 'RD'] = "/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RD/align_primary/chip/c28a7a00-d332-4997-ab07-59eedba9146c/call-call_peak/shard-0/execution/SEG0144_S2_L004_R1_001_val_1.nodup_x_SEG0143_S1_L004_R1_001_val_1.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+bed.loc['MYOD', 'RD'] = "/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RD/RD_IDR_Conservative.bed"
+bed.loc['K27ac', 'CTR'] = "/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/SMS-CTR/align_primary/chip/3b89bbf5-421e-444a-87c5-3bbe9b11dbff/call-call_peak/shard-0/execution/SEG0149_S7_L004_R1_001_val_1.srt.nodup_x_SEG0148_S6_L004_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+bed.loc['MYOD', 'CTR'] = "/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/SMS-CTR/SMS-CTR_IDR_Conservative.bed"
+
+fig = plt.figure()
+gs0 = GridSpec(2, 1, figure=fig, height_ratios=[1, 0.1], hspace=0.5)
+gs00 = GridSpecFromSubplotSpec(
+    4, 4, subplot_spec=gs0[0], hspace=0.02, wspace=0.02)
+for row in range(bed.shape[0]):
+    for col in range(bed.shape[1]):
+        ax = fig.add_subplot(gs00[row, col])
+        if row == 0:
+            title = bed.columns[col]
+        else:
+            title = ''
+        if col == 0:
+            ylabel = bed.index[row]
+        else:
+            ylabel = ''
+        if row == 3:
+            axis = True
+        else:
+            axis = False
+        #print('processing ' + bed.index[row] + " " + bed.columns[col])
+        if not pd.isna(bed.iloc[row, col]):
+            x = position_plot(pybedtools.BedTool(
+                bed.iloc[row, col]), ax=ax, title=title, ylabel=ylabel, custom_axis=axis)
+
+plt.margins(x=0)
+plt.xlim([0, 1])
+plt.tight_layout()
+#gs0[1].legend(loc="lower left", ncol=2, labels=[
+#              'Compartment A', 'Compartment B'])
+#plt.savefig('distribution_of_binding.png')
+plt.show()
+```
+
+## Switching
+
+```{r switching, fig.height=15, fig.width=15, fig.align="center"}
+data <- matrix(0, ncol = 12, nrow = 30894)
+data <- data.frame(data)
+type <- c("k27ac", "k9me3", "gc")
+j <- 1
+for (cell in c("RH4", "RH30", "RD", "CTR")) {
+    for (i in 1:3) {
+        x <- read.table(paste("/home/gdstantonlab/mxw010/Data/SPICE-C/", cell, "/Compartments/concordance/", cell, "_", type[i], ".cis.vecs.tsv", sep = ""), header = T, na.strings = "", sep = "\t")
+        data[, j] <- ifelse(x[, 6] > 0, 1, -1)
+        colnames(data)[j] <- paste(cell, type[i], sep = "_")
+        j <- j + 1
+    }
+}
+
+data <- cbind(x[, 1:3], data)
+data <- data[grep(F, apply(is.na(data[, -(1:3)]), 1, any)), ]
+tmp <- rownames(data)
+data$bins <- paste("bin_", tmp, sep = "")
+row.to.remove <- which(data$chrom == "chrX" | data$chrom == "chrY")
+data <- data[-row.to.remove, ]
+
+y <- data[, c(1, grep("k27ac", colnames(data)), ncol(data))]
+
+orders <- with(y, order(chrom, RH4_k27ac, RH30_k27ac, RD_k27ac, CTR_k27ac))
+y <- y[orders, ]
+y$orders <- 1:nrow(y)
+
+# n <- max(summary(y$chrom))
+# for (chr in unique(y$chrom)) {
+#     subs <- which(y$chrom==chr)
+#     y$orders[subs] <- seq(1, length(subs))
+#     }
+
+pos_to_neg <- with(y, which(RH4_k27ac == RH30_k27ac & RH30_k27ac != RD_k27ac & RD_k27ac == CTR_k27ac & RH4_k27ac == 1))
+neg_to_pos <- with(y, which(RH4_k27ac == RH30_k27ac & RH30_k27ac != RD_k27ac & RD_k27ac == CTR_k27ac & RH4_k27ac == -1))
+
+pos <- with(y, which(RH4_k27ac == RH30_k27ac & RH30_k27ac == RD_k27ac & RD_k27ac == CTR_k27ac & RH4_k27ac == 1))
+neg <- with(y, which(RH4_k27ac == RH30_k27ac & RH30_k27ac == RD_k27ac & RD_k27ac == CTR_k27ac & RH4_k27ac == -1))
+
+all.consist <- with(y, which(RH4_k27ac == RH30_k27ac & RH30_k27ac == RD_k27ac & RD_k27ac == CTR_k27ac))
+
+temp <- (x[rownames(y)[pos_to_neg], 1:3])
+write.table(temp, "pos_to_neg.bed", sep = "\t", quote = F, col.names = F, row.names = F)
+temp <- (x[rownames(y)[neg_to_pos], 1:3])
+write.table(temp, "neg_to_pos.bed", sep = "\t", quote = F, col.names = F, row.names = F)
+temp <- (x[rownames(y)[pos], 1:3])
+write.table(temp, "all_pos.bed", sep = "\t", quote = F, col.names = F, row.names = F)
+temp <- (x[rownames(y)[neg], 1:3])
+write.table(temp, "all_neg.bed", sep = "\t", quote = F, col.names = F, row.names = F)
+```
+
+- `r nrow(y) /10^4`gb (out of `r nrow(x)/10^9*100000`gb) of human genomes
+ have compartment vector values across 4 cell lines.
+
+- `r round((length(all.consist)/nrow(y))*100, 2)`% of the compartments are consistent across all 4 cell lines.
+
+- `r round((length(pos_to_neg)+length(neg_to_pos))/nrow(y)*100, 2)`% of the compartments swtiched between FP and FN RMS.
+
+- `r round(length(with(y, which(RH4_k27ac == RH30_k27ac)))*100/nrow(y),2)`% of the compartments are consistent between FP cell lines.
+
+- `r round(length(with(y, which(RD_k27ac == CTR_k27ac)))*100/nrow(y),2)`% of the compartments are consistent between FP cell lines.
+
+```{r Compartment_assignment_plot, fig.height=10, fig.width=10}
+df <- melt(y, id.vars = c("bins", "chrom", "orders"))
+tmp <- sapply(as.character(df$variable), function(x) strsplit(x, "_")[[1]][1])
+df$cell <- factor(tmp, levels = c("RH4", "RH30", "RD", "CTR"))
+# tmp <- sapply(as.character(df$variable), function(x) strsplit(x,"_")[[1]][2])
+# df$type <- factor(tmp, levels = type)
+df$chrom <- factor(df$chrom, levels = paste("chr", 1:22, sep = ""))
+
+
+# pdf('compartment_assignment.pdf',heigh=10,width=30)
+ggplot(df, aes(cell, orders, fill = as.factor(value))) +
+    geom_tile(size = 0.1) +
+    facet_wrap(vars(chrom), nrow = 4, scales = "free", dir = "v", strip.position = "top") +
+    scale_fill_manual(breaks = c(1, -1), labels = c("Compartment A", "Compartment B"), name = "", values = c("#63a7ff", "black")) +
+    theme(
+        axis.text.x = element_text(size = 16, angle = 90, hjust = 0),
+        axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        axis.title = element_text(size = 26),
+        legend.text = element_text(size = 24),
+        strip.text.x.top = element_text(size = 18, angle = 0),
+        legend.position = "top", legend.justification = "left", legend.direction = "horizontal",
+        legend.spacing.x = unit(0.5, "cm")
+    ) +
+    labs(x = "Cell Line", y = "Chromosomes (not in order)")
+# dev.off()
+```
+
+### Factors And switching (FP to FN)
+
+- `r length(pos_to_neg)` A compartments switchd to B.
+
+- `r length(neg_to_pos)` B compartments switchd to A.
+
+
+```{bash, include=FALSE}
+ml GCC/9.3.0
+ml SAMtools/1.10
+ml BEDTools/2.29.2
+cd /home/gdstantonlab/mxw010/Data/SPICE-C/analysis
+# echo "cell factor AB BA AA BB" > switch_table_tf.txt
+
+# #k27
+# bedtools intersect -u -b  /home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH30/align_primary/chip/2317294d-60c3-4998-9179-dc7da8c57608/call-call_peak/shard-0/execution/SEG0139_S7_L003_R1_001_val_1.srt.nodup_x_SEG0138_S6_L003_R1_001_val_1.srt.nodup.pval0.01.500K.narrowPeak.gz \
+#     -a /home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH4/align_primary/chip/b6b42932-8417-4ffd-bcfe-6c4ce74da28f/call-call_peak/shard-0/execution/SEG0134_S2_L003_R1_001_val_1.srt.nodup_x_SEG0133_S1_L003_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz \
+#     > FP-k27ac.bed
+# n1=`bedtools intersect -u -b \
+# FP-k27ac.bed \
+# -a pos_to_neg.bed | wc -l`
+# n2=`bedtools intersect -u \
+# -b FP-k27ac.bed \
+# -a neg_to_pos.bed | wc -l`
+# n3=`bedtools intersect -u -b FP-k27ac.bed -a all_pos.bed | wc -l`
+# n4=`bedtools intersect -u -b FP-k27ac.bed -a all_neg.bed | wc -l`
+# echo "FP-K27ac ${n1} ${n2} ${n3} ${n4}" >> switch_table_tf.txt
+
+# bedtools intersect -u -b /home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RD/align_primary/chip/c28a7a00-d332-4997-ab07-59eedba9146c/call-call_peak/shard-0/execution/SEG0144_S2_L004_R1_001_val_1.nodup_x_SEG0143_S1_L004_R1_001_val_1.nodup.pval0.01.500K.narrowPeak.gz \
+# -a /home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/SMS-CTR/align_primary/chip/3b89bbf5-421e-444a-87c5-3bbe9b11dbff/call-call_peak/shard-0/execution/SEG0149_S7_L004_R1_001_val_1.srt.nodup_x_SEG0148_S6_L004_R1_001_val_1.srt.nodup.pval0.01.500K.narrowPeak.gz \
+#  > FN-k27ac.bed
+# n1=`bedtools intersect -u -b \
+# FN-k27ac.bed \
+# -a pos_to_neg.bed | wc -l`
+# n2=`bedtools intersect -u \
+# -b FN-k27ac.bed \
+# -a neg_to_pos.bed | wc -l`
+# n3=`bedtools intersect -u -b FN-k27ac.bed -a all_pos.bed | wc -l`
+# n4=`bedtools intersect -u -b FN-k27ac.bed -a all_neg.bed | wc -l`
+# echo "FN-K27ac ${n1} ${n2} ${n3} ${n4}" >> switch_table_tf.txt
+
+# #MYOD
+# bedtools intersect -u -b /home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH4/RH4_IDR_Conservative.bed \
+#     -a /home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH30/RH30_IDR_Conservative.bed \
+#     > FP-MYOD.bed
+# n1=`bedtools intersect -u -b FP-MYOD.bed -a pos_to_neg.bed | wc -l`
+# n2=`bedtools intersect -u -b FP-MYOD.bed -a neg_to_pos.bed | wc -l`
+# n3=`bedtools intersect -u -b FP-MYOD.bed -a all_pos.bed | wc -l`
+# n4=`bedtools intersect -u -b FP-MYOD.bed -a all_neg.bed | wc -l`
+# echo "FP-MYOD ${n1} ${n2} ${n3} ${n4}" >> switch_table_tf.txt
+
+# bedtools intersect -u -b /home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RD/RD_IDR_Conservative.bed \
+#     -a /home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/SMS-CTR/SMS-CTR_IDR_Conservative.bed \
+#     > FN-MYOD.bed
+# n1=`bedtools intersect -u -b FN-MYOD.bed -a pos_to_neg.bed | wc -l`
+# n2=`bedtools intersect -u -b FN-MYOD.bed -a neg_to_pos.bed | wc -l`
+# n3=`bedtools intersect -u -b FN-MYOD.bed -a all_pos.bed | wc -l`
+# n4=`bedtools intersect -u -b FN-MYOD.bed -a all_neg.bed | wc -l`
+# echo "FN-MYOD ${n1} ${n2} ${n3} ${n4}" >> switch_table_tf.txt
+
+# #P3F
+# bedtools intersect -u -b /home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4.bed \
+#     -a /home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH30.bed \
+#     > FP-P3F.bed
+
+# n1=`bedtools intersect -u -b FP-P3F.bed -a pos_to_neg.bed | wc -l`
+# n2=`bedtools intersect -u -b FP-P3F.bed -a neg_to_pos.bed | wc -l`
+# n3=`bedtools intersect -u -b FP-P3F.bed -a all_pos.bed | wc -l`
+# n4=`bedtools intersect -u -b FP-P3F.bed -a all_neg.bed | wc -l`
+# echo "FP-P3F ${n1} ${n2} ${n3} ${n4}" >> switch_table_tf.txt
+
+# #MYCN
+# n1=`bedtools intersect -u -b MYCN_RH4.bed -a pos_to_neg.bed | wc -l`
+# n2=`bedtools intersect -u -b MYCN_RH4.bed -a neg_to_pos.bed | wc -l`
+# n3=`bedtools intersect -u -b MYCN_RH4.bed -a all_pos.bed | wc -l`
+# n4=`bedtools intersect -u -b MYCN_RH4.bed -a all_neg.bed | wc -l`
+# echo "MYCN-RH4 ${n1} ${n2} ${n3} ${n4}" >> switch_table_tf.txt
+
+# #Total
+# n1=`wc -l pos_to_neg.bed | awk '{print $1}'`
+# n2=`wc -l neg_to_pos.bed | awk '{print $1}'`
+# n3=`wc -l all_pos.bed  | awk '{print $1}'`
+# n4=`wc -l all_neg.bed  | awk '{print $1}'`
+# echo "Total ${n1} ${n2} ${n3} ${n4}" >> switch_table_tf.txt
+
+
+
+echo "cell factor AB BA AA BB sites" > switch_table_tf.txt
+
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH4/align_primary/chip/b6b42932-8417-4ffd-acfe-6c4ce74da28f/call-call_peak/shard-0/execution/SEG0134_S2_L003_R1_001_val_1.srt.nodup_x_SEG0133_S1_L003_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`zcat $bed | wc -l`
+echo "RH4-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH30/align_primary/chip/2317294d-60c3-4998-9179-dc7da8c57608/call-call_peak/shard-0/execution/SEG0139_S7_L003_R1_001_val_1.srt.nodup_x_SEG0138_S6_L003_R1_001_val_1.srt.nodup.pval0.01.500K.narrowPeak.gz"
+n1=`bedtools intersect -u -a \
+$bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a $bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`zcat $bed | wc -l`
+echo "RH30-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bedtools intersect -u -a  /home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH30/align_primary/chip/2317294d-60c3-4998-9179-dc7da8c57608/call-call_peak/shard-0/execution/SEG0139_S7_L003_R1_001_val_1.srt.nodup_x_SEG0138_S6_L003_R1_001_val_1.srt.nodup.pval0.01.500K.narrowPeak.gz \
+    -b /home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH4/align_primary/chip/b6b42932-8417-4ffd-bcfe-6c4ce74da28f/call-call_peak/shard-0/execution/SEG0134_S2_L003_R1_001_val_1.srt.nodup_x_SEG0133_S1_L003_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz \
+    > FP-k27ac.bed
+n1=`bedtools intersect -u -a \
+FP-k27ac.bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a FP-k27ac.bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FP-k27ac.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FP-k27ac.bed -b all_neg.bed | wc -l`
+n5=`wc -l FP-k27ac.bed | awk '{print $1}'`
+echo "FP-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RD/align_primary/chip/c28a7a00-d332-4997-ab07-59eedba9146c/call-call_peak/shard-0/execution/SEG0144_S2_L004_R1_001_val_1.nodup_x_SEG0143_S1_L004_R1_001_val_1.nodup.pval0.01.500K.narrowPeak.gz"
+n1=`bedtools intersect -u -a \
+$bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a $bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`zcat $bed | wc -l`
+echo "RD-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/SMS-CTR/align_primary/chip/3b89bbf5-421e-444a-87c5-3bbe9b11dbff/call-call_peak/shard-0/execution/SEG0149_S7_L004_R1_001_val_1.srt.nodup_x_SEG0148_S6_L004_R1_001_val_1.srt.nodup.pval0.01.500K.narrowPeak.gz"
+n1=`bedtools intersect -u -a \
+$bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a $bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`zcat $bed | wc -l`
+echo "CTR-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bedtools intersect -u -a /home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RD/align_primary/chip/c28a7a00-d332-4997-bb07-59eedba9146c/call-call_peak/shard-0/execution/SEG0144_S2_L004_R1_001_val_1.nodup_x_SEG0143_S1_L004_R1_001_val_1.nodup.pval0.01.500K.narrowPeak.gz \
+-b /home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/SMS-CTR/align_primary/chip/3b89bbf5-421e-444a-87c5-3bbe9b11dbff/call-call_peak/shard-0/execution/SEG0149_S7_L004_R1_001_val_1.srt.nodup_x_SEG0148_S6_L004_R1_001_val_1.srt.nodup.pval0.01.500K.narrowPeak.gz \
+ > FN-k27ac.bed
+n1=`bedtools intersect -u -a \
+FN-k27ac.bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a FN-k27ac.bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FN-k27ac.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FN-k27ac.bed -b all_neg.bed | wc -l`
+n5=`wc -l FN-k27ac.bed | awk '{print $1}'`
+echo "FN-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+#MYOD
+bed="/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH4/RH4_IDR_Conservative.bed"
+n1=`bedtools intersect -u -a \
+$bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a $bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RH4-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH30/RH30_IDR_Conservative.bed"
+n1=`bedtools intersect -u -a \
+$bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a $bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RH30-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+
+bedtools intersect -u -a /home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH4/RH4_IDR_Conservative.bed \
+    -b /home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH30/RH30_IDR_Conservative.bed \
+    > FP-MYOD.bed
+n1=`bedtools intersect -u -a FP-MYOD.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a FP-MYOD.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FP-MYOD.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FP-MYOD.bed -b all_neg.bed | wc -l`
+n5=`wc -l FP-MYOD.bed | awk '{print $1}'`
+echo "FP-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RD/RD_IDR_Conservative.bed"
+n1=`bedtools intersect -u -a \
+$bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a $bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RD-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/SMS-CTR/SMS-CTR_IDR_Conservative.bed"
+n1=`bedtools intersect -u -a \
+$bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a $bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "CTR-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bedtools intersect -u -a /home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RD/RD_IDR_Conservative.bed \
+    -b /home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/SMS-CTR/SMS-CTR_IDR_Conservative.bed \
+    > FN-MYOD.bed
+n1=`bedtools intersect -u -a FN-MYOD.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a FN-MYOD.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FN-MYOD.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FN-MYOD.bed -b all_neg.bed | wc -l`
+n5=`wc -l FN-MYOD.bed | awk '{print $1}'`
+echo "FN-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+#P3F
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4.bed"
+n1=`bedtools intersect -u -a \
+$bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a $bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RH4-P3F ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH30.bed"
+n1=`bedtools intersect -u -a \
+$bed \
+-b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u \
+-a $bed \
+-b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RH30-P3F ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+
+bedtools intersect -u -a /home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4.bed \
+    -b /home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH30.bed \
+    > FP-P3F.bed
+
+n1=`bedtools intersect -u -a FP-P3F.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a FP-P3F.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FP-P3F.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FP-P3F.bed -b all_neg.bed | wc -l`
+n5=`wc -l FP-P3F.bed | awk '{print $1}'`
+echo "FP-P3F ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+#MYCN
+n1=`bedtools intersect -u -a MYCN_RH4.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a MYCN_RH4.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a MYCN_RH4.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a MYCN_RH4.bed -b all_neg.bed | wc -l`
+n5=`wc -l MYCN_RH4.bed | awk '{print $1}'`
+echo "RH4-MYCN ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+#Total
+n1=`wc -l pos_to_neg.bed | awk '{print $1}'`
+n2=`wc -l neg_to_pos.bed | awk '{print $1}'`
+n3=`wc -l all_pos.bed  | awk '{print $1}'`
+n4=`wc -l all_neg.bed  | awk '{print $1}'`
+n5=`wc -l /home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/concordance/RH4_k27ac.cis.vecs.tsv | awk '{print $1}'`
+echo "Total-bll ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+sed -ie 's/-/ /g' switch_table_tf.txt
+```
+
+<!--
+<div class = "row">
+<div class = "col-md-6">
+-->
+```{r factor_and_switching, fig.height=10, fig.width=20}
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+data <- read.table("switch_table.txt", header = T)
+# data <- data[, -ncol(data)]
+x <- data
+x[, 3:6] <- sapply(3:6, function(i) data[, i] / data[nrow(data), i])
+# x[nrow(x),] <- data[nrow(data),]
+x$cell <- factor(x$cell, levels = c("RH4", "RH30", "FP", "RD", "CTR", "FN"))
+x$factor <- factor(x$factor, levels = c("K27ac", "MYOD", "P3F", "MYCN"))
+df <- melt(x[-nrow(x), -ncol(x)])
+
+df$se <- unlist(sqrt((df$value * (1 - df$value)) / data[nrow(data), sapply(df$variable, match, table = colnames(data))]), use.names = F)
+dodge <- position_dodge(width = 0.9)
+
+
+subset(df, (cell == "FP" | cell == "FN")) %>%
+    mutate(type = factor(variable, levels = c("AB", "BA", "AA", "BB"))) %>%
+    subset(factor != "P3F") %>%
+    ggplot(aes(x = type, y = value, fill = cell)) +
+    # geom_line(size=1.5, linetype='twodash') +
+    geom_bar(position = "dodge", stat = "identity", color = "black") +
+    # geom_errorbar(aes(ymin=value-se, ymax=value+se), position=dodge, width=0.5, size=1.2) +
+    facet_wrap(vars(factor)) +
+    scale_fill_manual(values = cbPalette, name = "Factor") +
+    ylab("Percentages")
+
+
+y <- subset(x, cell == "FP" | cell == "FN")
+y[, 3:6] <- y[, 3:6] / (y$sites / 10000)
+
+ggplot(data = melt(y[, -ncol(y)]), aes(x = variable, y = value, fill = cell)) +
+    # geom_line(size=1.5, linetype='twodash') +
+    geom_bar(position = "dodge", stat = "identity", color = "black") +
+    # geom_errorbar(aes(ymin=value-se, ymax=value+se), position=dodge, width=0.5, size=1.2) +
+    facet_wrap(vars(factor)) +
+    scale_fill_manual(values = cbPalette, name = "Factor") +
+    ylab("Percentages")
+
+
+data <- read.table("switch_table_tf.txt", header = T)
+x <- data
+x[, 3:7] <- t(apply(x[, -(1:2)], 1, function(y) y / y[length(y)]))
+x$sites <- data$sites
+x <- x[-nrow(x), ]
+x$cell <- factor(x$cell, levels = c("RH4", "RH30", "FP", "RD", "CTR", "FN"))
+x$factor <- factor(x$factor, levels = c("K27ac", "MYOD", "P3F", "MYCN"))
+df <- melt(x[, -ncol(x)], id.vars = c("cell", "factor"))
+total <- mapply(function(a, b) {
+    data$sites[which(data$cell == a & data$factor == b)]
+}, df$cell, df$factor)
+df$se <- unlist(sqrt((df$value * (1 - df$value)) / total), use.names = F)
+dodge <- position_dodge(width = 0.9)
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+subset(df, (cell == "FP" | cell == "FN")) %>%
+    mutate(type = factor(variable, levels = c("AB", "BA", "AA", "BB"))) %>%
+    subset(variable != "AA" & variable != "BB") %>%
+    ggplot(aes(x = type, y = value, fill = factor)) +
+    # geom_line(size=1.5, linetype='twodash') +
+    geom_bar(position = "dodge", stat = "identity", color = "black") +
+    geom_errorbar(aes(ymin = value - se, ymax = value + se), position = dodge, width = 0.5, size = 1.2) +
+    facet_wrap(vars(cell)) +
+    scale_fill_manual(values = cbPalette, name = "Factor") +
+    ylab("Percentages")
+
+
+p1 <- ggplot(subset(df, variable == "AB" | variable == "BA"), aes(x = factor, y = value, fill = variable)) +
+    geom_bar(position = "fill", stat = "identity") +
+    geom_hline(yintercept = data[nrow(data), 4] / sum(data[nrow(data), 3:4]), linetype = "dashed", col = "black", size = 3) +
+    facet_wrap(vars(cell)) +
+    scale_fill_viridis(discrete = T, labels = c("A->B", "B->A")) +
+    # scale_y_continuous(labels=scales::percent) +
+    theme_minimal() +
+    xlab("Cell Lines") +
+    ylab("Percentages") +
+    ggtitle("Switched Compartments") +
+    theme(axis.text.x = element_text(size = 16, angle = 90, hjust = 0))
+
+p2 <- ggplot(subset(df, variable == "AA" | variable == "BB"), aes(x = factor, y = value, fill = variable)) +
+    geom_bar(position = "fill", stat = "identity") +
+    geom_hline(yintercept = data[nrow(data), 6] / sum(data[nrow(data), 5:6]), linetype = "dashed", col = "black", size = 3) +
+    facet_wrap(vars(cell)) +
+    scale_fill_viridis(discrete = T, labels = c("A->A", "B->B")) +
+    scale_y_continuous(labels = scales::percent) +
+    theme_minimal() +
+    xlab("Cell Lines") +
+    ggtitle("Consistent Compartments") +
+    ylab("Percentages") +
+    theme(
+        axis.text.x = element_text(size = 16, angle = 90, hjust = 0)
+    )
+grid.arrange(p1, p2, ncol = 2)
+```
+<!--
+</div>
+<div class = "col-md-6">
+-->
+
+```{r switching_table, cache = FALSE, eval = FALSE}
+data %>%
+    gt(rowname_col = "cell") %>%
+    cols_label(
+        cell = "Cell Lines",
+        AB = "A -> B",
+        BA = "B -> A"
+    ) %>%
+    fmt_number(columns = c(AB, BA), decimals = 0)
+```
+<!--
+</div>
+</div>
+-->
+
+### PC1 association with Factors (# of Binding Sites)
+
+```{bash get_binding_sites_PC1_score}
+ml GCC/9.3.0 BEDTools/2.29.2
+
+binding_site_score () {
+    bed=$1
+    tsv=$2
+    tail -n+2 $tsv | awk 'BEGIN {FS="\t"; OFS="\t"} $6!= "" {print $1,$2,$3,$6}' > temp
+    echo $bed | if grep -q ".gz";
+        then zcat $bed | cut -f-3
+    else
+        cut -f-3 $bed
+    fi > junk
+    bedtools intersect -wao -b junk -a  temp |
+    awk 'BEGIN {FS="\t"; OFS="\t"} $7!="." {print $1,$2,$3,$7}' |
+    sort -k1,1 -k2,2n |
+    bedtools merge -i - -c 4 -o mean
+}
+
+tsv="/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/K27ac_100kb/RH4_100kb.cis.vecs.tsv"
+#P3F
+bed="/home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4.bed"
+binding_site_score $bed $tsv |
+    awk '{print "P3F", $4}' > result.txt
+
+#MYCN
+bed="/home/gdstantonlab/mxw010/Data/SPICE-C/analysis/MYCN_RH4.bed"
+binding_site_score $bed $tsv |
+    awk '{print "MYCN", $4}' >> result.txt
+
+#MYOD
+bed="/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH4/RH4_IDR_Conservative.bed"
+binding_site_score $bed $tsv |
+    awk '{print "MYOD", $4}' >> result.txt
+
+#K27ac
+bed="/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH4/align_primary/chip/b6b42932-8417-4ffd-bcfe-6c4ce74da28f/call-call_peak/shard-0/execution/SEG0134_S2_L003_R1_001_val_1.srt.nodup_x_SEG0133_S1_L003_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+binding_site_score $bed $tsv |
+    awk '{print "K27ac", $4}' >> result.txt
+```
+
+
+
+```{python binding_sites, echo = FALSE, warning = FALSE, message = FALSE, error = FALSE}
+
+compartment = pd.read_csv('/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/K27ac_100kb/RH4_info.csv', header=0, sep="\t")
+ #                         dtype={'K27ac':'Int64', 'K9me3':'Int64', 'MYOD':'Int64', 'PAX3-FOXO1': 'Int64'})
+compartment.dropna(inplace=True)
+compartment['cat'] = int(0)
+for idx,x in enumerate(compartment['E1']):
+    compartment.iloc[idx,-1] = int(round(x))
+
+df_long=pd.melt(compartment[['cat', 'K27ac', 'K9me3', 'MYOD', 'PAX3-FOXO1']], id_vars='cat')
+f, ax = plt.subplots(2,4, sharey = 'col', figsize=(15,8))
+sns.set_theme(style="ticks", palette="pastel")
+for i, factor in enumerate(compartment.columns[8:12]):
+    _ = sns.scatterplot(x='E1', y = factor, data=compartment, ax = ax[0,i], s= 5)
+    _ = sns.violinplot(x='cat', y='value', data=df_long[df_long['variable'] == factor], color='g', ax = ax[1,i])
+    if i ==0:
+        ax[0,i].set(title = factor,
+            xlabel = None,
+            ylabel = "# of Binding Sites")
+        ax[1,i].set(title = None,
+            xlabel = 'PC1',
+            ylabel = "# of Binding Sites")
+    else:
+        ax[0,i].set(title = factor,
+            xlabel = None,
+            ylabel = None)
+        ax[1,i].set(title = None,
+            xlabel = 'PC1',
+            ylabel = None)
+
+_ = f.suptitle("Association Between # of Binding Sites and Eigenvectors")
+f.tight_layout()
+#plt.savefig('binding_sites_corr.pdf')
+plt.show()
+```
+
+### PC1 association with Factors (# of Average Intensity Inside Each Bin)
+```{python intensity_asso, echo = FALSE, warning = FALSE, message = FALSE, error = FALSE}
+warnings.filterwarnings('ignore')
+import pybedtools
+f, ax = plt.subplots(2,4, sharey = 'col', figsize=(15,8))
+sns.set_theme(style="ticks", palette="pastel")
+
+
+for i, factor in enumerate(compartment.columns[8:12]):
+    if factor == 'PAX3-FOXO1':
+        factor_alias='P3F'
+    else:
+        factor_alias = factor
+    bedgraph = pd.read_csv('/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/K27ac_100kb/RH4_' + factor_alias + '_100kb.bedgraph', sep="\t",header=None)
+    bedgraph.columns = ['chrom','start', 'end', factor]
+    df = pd.merge(compartment[['chrom', 'start', 'end', 'E1', 'cat']], bedgraph, on = ['chrom', 'start', 'end'])
+    _ = sns.scatterplot(x='E1', y = factor, data=df, ax = ax[0,i], s= 5)
+    _ = sns.violinplot(x='cat', y=factor, data=df, color='g', ax = ax[1,i])
+    ax[0,i].set_ylim([0,2])
+    if i ==0:
+        ax[0,i].set(title = factor,
+            xlabel = None,
+            ylabel = "Avg Intensity")
+        ax[1,i].set(title = None,
+            xlabel = 'PC1',
+            ylabel = "Avg Intensity")
+    else:
+        ax[0,i].set(title = factor,
+            xlabel = None,
+            ylabel = None)
+        ax[1,i].set(title = None,
+            xlabel = 'PC1',
+            ylabel = None)
+
+_ = f.suptitle("Association Between Eigenvectors and ChIP-seq Signals")
+f.tight_layout()
+plt.show()
+#plt.savefig('binidng_assic_with_E1.pdf')
+
+```
+<!--
+# ```{r}
+# compartment <- read.table('/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/K27ac_100kb/RH4_info.csv', header=T, sep="\t")
+# compartment <- compartment[rowSums(is.na(compartment)) ==0,]
+
+# for (factor in colnames(compartment)[9:13]) {
+#     factor_alias <- ifelse(factor == 'PAX3.FOXO1', 'P3F', factor)
+#     bedgraph <- read.table(paste('/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/K27ac_100kb/RH4_', factor_alias, '_100kb.bedgraph', sep=""), sep="\t",header=F)
+#     colnames(bedgraph) <- c('chrom','start', 'end', factor)
+#     df <- merge(compartment[,(c(1:3,6))], bedgraph)
+# }
+# ```
+-->
+
+
+### Myogenic and Neurogenic Genes in Switched Compartments
+```{bash, include = FALSE, eval=FALSE}
+cd switching
+rm -rf result.txt
+echo "chr start end nearest_TSS Gene Gene_Type Factor Cell_Line Switch_Type" > result.txt
+for dir in `ls -d */ | grep -v "-"`; do
+    dir=`basename $dir`
+    awk 'BEGIN {FS="\t"; OFS="\t"} {print $2,$3,$4,$10,$16,$NF}' ${dir}/${dir}_annotated.bed | tail -n+2 > temp
+    grep -w -f /home/gdstantonlab/mxw010/Data/SPICE-C/RH4/myogenesis/myogenesis.txt temp | awk -v type=$dir '{print $1,$2,$3,$4,$5,$6, type}'
+done | sed 's/_/ /g' >> result.txt
+```
+
+```{bash, include = FALSE, eval=FALSE}
+cd /home/gdstantonlab/mxw010/Data/SPICE-C/RH4/myogenesis
+bedtools intersect -u -a neurogenesis.bed -b ~/Data/SPICE-C/analysis/pos_to_neg.bed > temp
+awk 'BEGIN {FS="\t"; OFS="\t"}{print $0, "A-B", "Neurogenic"}' temp >> compartment_switch.bed
+bedtools intersect -u -a neurogenesis.bed -b ~/Data/SPICE-C/analysis/neg_to_pos.bed > temp
+awk 'BEGIN {FS="\t"; OFS="\t"}{print $0, "B-A", "Neurogenic"}' temp >> compartment_switch.bed
+bedtools intersect -u -a myogenesis.bed -b ~/Data/SPICE-C/analysis/neg_to_pos.bed > temp
+awk 'BEGIN {FS="\t"; OFS="\t"}{print $0, "B-A", "Myogenenic"}' temp >> compartment_switch.bed
+bedtools intersect -u -a myogenesis.bed -b ~/Data/SPICE-C/analysis/pos_to_neg.bed > temp
+awk 'BEGIN {FS="\t"; OFS="\t"}{print $0, "A-B", "Myogenenic"}' temp >> compartment_switch.bed
+
+```
+```{r genes_compartment_switch, include = FALSE, eval= FALSE}
+library(DT)
+x <- read.table("switching/result.txt", header = TRUE)
+
+for (i in 5:9) {
+    x[, i] <- factor(x[, i], levels = unique(x[, i]))
+}
+datatable(x, rownames = FALSE, filter = "top", options = list(
+    pageLength = 50, autoWidth = TRUE,
+    columnDefs = list(list(width = "1000px", targets = list(4)))
+))
+```
+
+### Enrichment Analysis
+```{bash enrichment, eval = FALSE, include = FALSE}
+rm -rf Gene_AtoB.txt
+
+echo "Factor Type Ensembl Gene_name" > Gene_annotated.txt
+
+for dir in `ls -d MYOD*AtoB`; do
+    dir=`basename $dir`
+    awk -F "\t" '$15 !="" {print $15, $16}' ${dir}/${dir}_annotated.bed | tail -n+2 | awk '{print "MYOD", "AtoB", $1,$2}' >> Gene_annotated.txt
+done
+
+for dir in `ls -d P3F*AtoB`; do
+    dir=`basename $dir`
+    awk -F "\t" '$15 !="" {print $15, $16}' ${dir}/${dir}_annotated.bed | tail -n+2 | awk '{print "P3F", "AtoB", $1,$2}' >> Gene_annotated.txt
+done
+
+for dir in `ls -d MYCN*AtoB`; do
+    dir=`basename $dir`
+    awk -F "\t" '$15 !="" {print $15, $16}' ${dir}/${dir}_annotated.bed | tail -n+2 | awk '{print "MYCN", "AtoB", $1,$2}' >> Gene_annotated.txt
+done
+
+for dir in `ls -d MYOD*BtoA`; do
+    dir=`basename $dir`
+    awk -F "\t" '$15 !="" {print $15, $16}' ${dir}/${dir}_annotated.bed | tail -n+2 | awk '{print "MYOD", "BtoA", $1,$2}' >> Gene_annotated.txt
+done
+
+for dir in `ls -d P3F*BtoA`; do
+    dir=`basename $dir`
+    awk -F "\t" '$15 !="" {print $15, $16}' ${dir}/${dir}_annotated.bed | tail -n+2 | awk '{print "P3F", "BtoA", $1,$2}' >> Gene_annotated.txt
+done
+
+for dir in `ls -d MYCN*BtoA`; do
+    dir=`basename $dir`
+    awk -F "\t" '$15 !="" {print $15, $16}' ${dir}/${dir}_annotated.bed | tail -n+2 | awk '{print "MYCN", "BtoA", $1,$2}' >> Gene_annotated.txt
+done
+
+
+# sort Gene_AtoB.txt | uniq > temp
+
+# mv temp gene_annotation.txt
+
+# for dir in `ls -d *BtoA `; do
+#     dir=`basename $dir`
+#     awk -F "\t" '$15 !="" {print $15, $16}' ${dir}/${dir}_annotated.bed | tail -n+2 >> Gene_BtoA.txt
+# done
+# sort Gene_BtoA.txt | uniq > temp
+# mv temp Gene_BtoA.txt
+```
+
+````{r GO_annotation}
+library(gprofiler2)
+x <- read.table("switching/Gene_annotated.txt", header = T)
+# head(subset(x, Factor =="MYOD" & Type == "AtoB")['Gene_name'])
+
+
+y <- subset(x, Factor == "MYCN" & Type == "AtoB")["Gene_name"]
+gostres <- gost(query = unlist(y, use.names = F))
+
+temp <- gostres$result[c("source", "term_name", "p_value", "precision", "recall")]
+
+write.table(temp, "temp.txt", sep = ",", col.names = F, quote = F, row.names = F)
+
+datatable(gostres$result[c("source", "term_name", "p_value", "precision", "recall")],
+    rownames = FALSE, filter = "top", options = list(pageLength = 50, autoWidth = TRUE)
+) %>%
+    formatRound(columns = c("p_value", "precision", "recall"), digits = 2)
+# precision = tp/(tp+fp)
+# recall = tp/(tp+fn)
+# get_version_info(organism = "hsapiens")
+```
+
+## Association with Gene Expression:
+
+# Topological Associated Domains
+
+### Is P3F associated with CTCF?
+```{bash}
+/home/gdstantonlab/mxw010/Data/SPICE-C/RH4/TopDom/sim/P3F
+bedtools intersect -c -b P3F_actual_overlap_start.bed -a $factor > temp1
+bedtools intersect -c -b P3F_actual_overlap_end.bed -a $factor > temp2
+paste temp1 temp2 | awk '$5 >0 && $6>0 && $11>0 && $12>0 {print}'
+```
+
+There are 20 TADs with P3F flanking both sides, and 14 out of those have CTCF binding sites.
+There are a total of 1860 TADs, 855 of them have CTCF binding sites at both ends. Doing a proportion test for equality,
+*p*-value = 0.055.
+
+# All defaults
+
+## Cell Line Comparison:
+
+- RH4
+- RH30
+- RD
+- CTR
+
+## Geneset at TAD boundary:
+
+- Myogenic
+- Neurogenic
+
+## TAD Boundary Association with TF/HM:
+
+- MYOD
+- PAX3-FOXO1
+- K27me3
+- K4me1
+- K4me3
+
+- P3F sites at boundary. do they have nearby CTCF?
+
+- Genes flanking (enrichment) TADs (homer)
+
+## Conserved vs Non-conserved TADs
+
+- conserved across FN/FP
+- non-conserved between FN/FP
+
+## High confidence CTCF at TADs >> P3F >> MYOD
+
+# Structural Variants
+
+## CNV Estimates for cell lines
+- RH30 cell lines see more deletions than the other 3.
+- FN cell lines have altered CNV profiles.
+
+```{r cnv_cell_summary}
+library(reshape2)
+library(ggplot2)
+library(magrittr)
+library(dplyr)
+x <- read.table("/gpfs0/home2/gdstantonlab/mxw010/Data/SPICE-C/CNV/CNV_estimates.bed")
+
+# average CN estimation per genome:
+genome.length <- sum(x[, 3] - x[, 2])
+# sapply(4:7, function(i) x[,i] %*% (x[,3]-x[,2]) / genome.length)
+# [1] 1.902588 1.862210 1.995338 1.894950
+
+# histogram:
+# 10kb bin, the common demoninator
+dat <- matrix(0, ncol = 4, nrow = sum((x[, 3] - x[, 2])) / 10000)
+
+row.idx <- 1
+for (i in 1:nrow(x)) {
+    n <- (x[i, 3] - x[i, 2]) / 10^4
+    for (j in 1:4) {
+        dat[row.idx:(row.idx + n - 1), j] <- rep(x[i, j + 3], n)
+    }
+    row.idx <- row.idx + n
+}
+
+dat <- data.frame(dat)
+colnames(dat) <- c("RH4", "RH30", "RD", "CTR")
+
+# Table
+temp <- melt(dat) %>%
+    mutate(value = if_else(value > 4, 5, value)) %>%
+    table()
+
+dist_celllines <- temp / rowSums(temp)
+
+df1 <- cbind(dist_celllines[, 1:4], rowSums(dist_celllines[, 5:6]))
+df1 <- as.data.frame(df1)
+colnames(df1) <- c("0", "1", "2", "3", ">3")
+df1$Cells <- rownames(df1)
+
+df1 %>%
+    gt(rowname_col = "Cells") %>%
+    fmt_percent(columns = colnames(df1), scale_values = TRUE)
+# temp <- melt(dat) %>%
+# mutate(value=if_else(value>4,5,value))
+# mutate(value=as.character(value))
+
+# #pdf('cnv_bar.pdf')
+# ggplot(data=temp, aes(x=variable,fill=value))+
+# geom_bar(position='dodge') +
+# scale_fill_manual(breaks=0:5, name = 'Copy Number', values = c("#01092D", "#075AFF","#FFFFCC", "#FF0000","#FF0000","#FF0000"))+
+# xlab('Cell Lines') +
+# scale_y_continuous(breaks=c(0,25,50)/100*nrow(dat), name='Percentage', labels=paste(c(0,25,50),"%",sep=""))+
+# ggtitle('Copy Number Distribution for RMS Cell Lines') +
+# theme(plot.title = element_text(hjust = 0.5, size=20),
+#       panel.grid.major.x = element_blank(),
+#       panel.grid.minor.x = element_blank(),
+#       axis.text = element_text(size=12),
+#       axis.title = element_text(size=16),
+#       strip.text = element_text(size=16))
+# dev.off()
+
+# pdf('cnv_histogram.pdf')
+melt(dat) %>%
+    mutate(value = if_else(value > 4, 5, value)) %>%
+    ggplot(aes(value)) +
+    geom_bar(stat = "count") +
+    facet_wrap(~variable, nrow = 1) +
+    scale_x_continuous(breaks = 0:5, name = "Copy Number", labels = c("0", "1", "2", "3", "4", "> 4")) +
+    ggtitle("CN Distributions for RMS Cell Lines") +
+    scale_y_continuous(breaks = c(0, 25, 50) / 100 * nrow(dat), name = "Percentage", labels = paste(c(0, 25, 50), "%", sep = "")) +
+    theme_minimal() +
+    theme(
+        plot.title = element_text(hjust = 0.5, size = 20),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size = 16)
+    )
+
+# dev.off()
+
+
+# merging
+for (i in 4:7) {
+    tmp <- x[, i]
+    tmp[which(tmp > 2)] <- 3
+    x[, i] <- tmp
+}
+
+x[, 1] <- factor(x[, 1], levels = unique(x[, 1]))
+y <- cbind(x[, 1], x[, 2] / 10^6, x[, 3] / 10^6, x[, 4:7])
+colnames(y) <- c("chr", "start", "end", "RH4", "RH30", "RD", "CTR")
+
+dat <- melt(y, id.vars <- c("chr", "start", "end"))
+dat[, 1] <- factor(dat[, 1])
+dat$value <- as.factor(dat$value)
+dat$x <- ifelse(dat$variable == "RH4", 1, ifelse(dat$variable == "RH30", 2, ifelse(dat$variable == "RD", 3, 4)))
+
+# pdf('cnv_heatmap.pdf')
+p1 <- ggplot(dat, aes(xmin = x - 0.5, xmax = x + 0.5, ymin = start, ymax = end, fill = value)) +
+    geom_rect() +
+    scale_fill_manual(values = c("#01092D", "#075AFF", "#FFFFCC", "#FF0000"), labels = c("0", "1", "2", ">2"), name = "Copy Number Estimation") +
+    scale_x_continuous(name = "Cell Lines", breaks = 1:4, labels = c("RH4", "RH30", "RD", "CTR")) +
+    facet_wrap(~chr, scales = "free_y", nrow = 4) +
+    theme(
+        panel.background = element_blank(), legend.position = "bottom",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+    )
+```
+
+
+```{bash, eval=FALSE}
+bedtools intersect -wo -b ~/GenRef/hg38/Annotation/Genes/refGene_per_gene.gtf -a CNV_estimates.bed > CNV_annotated.bed
+#amplified in all 4 cell Lines
+awk '$9>2 && $10 > 2 && $11 > 2 && $12>2 && $3-$2 == $NF {print $5}' CNV_annotated.bed | grep -v MIR* | grep -v LOC* | grep -v LINC* | grep -v AS1 | sort | uniq
+awk '$9>2 && $10 > 2 && $11 <= 2 && $12 <=2 && $3-$2 == $NF {print $5}' CNV_annotated.bed | grep -v MIR* | grep -v LOC* | grep -v LINC* | grep -v AS | sort | uniq
+awk '$9<=2 && $10 <= 2 && $11 > 2 && $12 > 2 && $3-$2 == $NF {print $5}' CNV_annotated.bed | grep -v MIR* | grep -v LOC* | grep -v LINC* | grep -v AS | sort | uniq
+
+
+bedtools intersect -wo -b /home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4_idr.bed -a CNV_estimates.bed > P3F_binding_CNV.bed
+bedtools intersect -wo -b /home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH4/RH4_IDR_Conservative.bed -a CNV_estimates.bed > MYOD_binding_CNV.bed
+bedtools intersect -wo -b /home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/H3K27ac.bed -a CNV_estimates.bed > K27ac_binding_CNV.bed
+bedtools intersect -wo -b /home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/H3K9me3.bed -a CNV_estimates.bed > K9me3_binding_CNV.bed
+```
+
+## CN Estimates for RH4 celll lines:
+```{r P3F_binding sites CNV}
+cnv_length <- function(k, n) {
+    row.select <- which(x[, n] == k)
+    return(sum(x[row.select, 3] - x[row.select, 2]))
+}
+
+x <- read.table("/home/gdstantonlab/mxw010/Data/SPICE-C/CNV/P3F_binding_CNV.bed")
+RH4_count <- sapply(unique(x[, 14]), cnv_length, n = 14)
+
+RH4 <- cbind(unique(x[, 14]), RH4_count, RH4_count / sum(RH4_count) * 100)[order(unique(x[, 14])), ]
+colnames(RH4) <- c("CN", "total", "perc")
+RH4 <- as.data.frame(RH4)
+RH4$target <- "P3F"
+
+x <- read.table("/home/gdstantonlab/mxw010/Data/SPICE-C/CNV/MYOD_binding_CNV.bed")
+RH4_count <- sapply(unique(x[, 14]), cnv_length, n = 14)
+MYOD <- cbind(unique(x[, 14]), RH4_count, RH4_count / sum(RH4_count) * 100)[order(unique(x[, 14])), ]
+colnames(MYOD) <- c("CN", "total", "perc")
+MYOD <- as.data.frame(MYOD)
+MYOD$target <- "MYOD"
+
+x <- read.table("/home/gdstantonlab/mxw010/Data/SPICE-C/CNV/K27ac_binding_CNV.bed")
+RH4_count <- sapply(unique(x[, 14]), cnv_length, n = 14)
+K27ac <- cbind(unique(x[, 14]), RH4_count, RH4_count / sum(RH4_count) * 100)[order(unique(x[, 14])), ]
+colnames(K27ac) <- c("CN", "total", "perc")
+K27ac <- as.data.frame(K27ac)
+K27ac$target <- "K27ac"
+
+x <- read.table("/home/gdstantonlab/mxw010/Data/SPICE-C/CNV/K9me3_binding_CNV.bed")
+RH4_count <- sapply(unique(x[, 14]), cnv_length, n = 14)
+K9me3 <- cbind(unique(x[, 14]), RH4_count, RH4_count / sum(RH4_count) * 100)[order(unique(x[, 14])), ]
+colnames(K9me3) <- c("CN", "total", "perc")
+K9me3 <- as.data.frame(K9me3)
+K9me3$target <- "K9me3"
+
+RH4 <- rbind(RH4, MYOD, K27ac, K9me3)
+
+ggplot(data = RH4, aes(x = CN, y = perc, )) +
+    geom_bar(stat = "identity", position = "dodge") +
+    coord_cartesian(xlim = c(0, 6)) +
+    xlab("Copy Number") +
+    facet_wrap(~target, nrow = 1) +
+    ggtitle("CN Distributions for Binding Sites (RH4)") +
+    scale_y_continuous(breaks = c(0, 25, 50), name = "Percentage", labels = paste(c(0, 25, 50), "%", sep = "")) +
+    theme_minimal() +
+    theme(
+        plot.title = element_text(hjust = 0.5, size = 20),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size = 16)
+    )
+temp <- acast(RH4[, -3], CN ~ target, value.var = "total", fill = 0)
+dist.dat <- temp
+dist.dat[7, ] <- colSums(dist.dat[7:9, ])
+dist.dat <- dist.dat[1:7, ]
+
+# chisq.test(cbind(dist.dat[,c(2,4)],rowSums(dist.dat[,-c(2,4)])))
+
+# RH30_count <- sapply(0:7, cnv_length, n=15)
+# RH30_count/sum(RH30_count) * 100
+
+# RD_count <- sapply(0:7, cnv_length, n=16)
+# RD_count/sum(RD_count) * 100
+
+# CTR_count <- sapply(0:7, cnv_length, n=17)
+# CTR_count/sum(CTR_count) * 100
+ ```
+
+- All 4 TF/HMs see increased CN=3, CN = 2 and decreased CN=1 compared to the null.
+<!--
+RNG scripts and results located in /home/gdstantonlab/mxw010/Data/SPICE-C/CNV/simulation
+-->
+
+    -- Randomly generate binding sites throughout the genome would generate a CND mor similar to the histogram above.
+
+   -- CI for CN=1 is (0.220, 0.239).
+
+   -- CI for CN=2 is (0.490, 0.514).
+
+   -- CI for CN=3 is (0.137, 0.152).
+
+- But P3F binding sites show higher CN=3 frequency compared to K27ac, K9me3 and MYOD (*p*-value $< -2.2 \times 10^{16}$).
+
+## Genes
+
+- Genes that are associated with increased CN in FP but decreased CN in FN have significant GO analysis result.
+
+
+## CNV profile between FP and FN Cell Lines:
+
+```{r cnv_profile_plot,fig.height=10, fig.width=8}
+p1
+```
+
+## PAX3-FOXO1 Locus
+<!--
+#script uesd  to generate all figures are at:
+#/home/gdstantonlab/mxw010/Data/SPICE-C/neoloop_plot.py
+-->
+- Both RH4 and RH30 cell lines see increased CN at PAX3:
+    - RH4: 3, RH30: 9, RD: 3 and CTR: 2
+- FOXO1 have increased CN in FP as well:
+    - chr13:40,230,000 - 40,620,000: 3, 6, 1 and 3.
+    - FOXO1: 40,560,000- 40,660,000, reverse. (CN: 3,2,1 and 3)
+
+```{r p3f-areak}
+x <- read.table("/gpfs0/home2/gdstantonlab/mxw010/Data/SPICE-C/CNV/CNV_estimates.bed")
+# PAX3:
+# x[which(x[,1]=='chr2' & (x[,2] <= 222200000 & x[,3] >= 222300000)),]
+# 936 chr2 222200000 222380000  3  9  3  2
+# FOXO1:
+# 4389 chr13  40230000  40620000  3  6  1  3
+# 4390 chr13  40620000  41070000  3  2  1  3
+
+
+knitr::include_graphics("/home/gdstantonlab/mxw010/Data/SPICE-C/analysis/PAX3-FOXO1_breaks.png")
+```
+
+
+## SJCRH vs FN Cell Lines
+
+- 3 patients, all fusion negative (SJCRH-13758, SJCRH-a011 and SJCRH-a013).
+- SJCRH patients genomes have different SVs from FN cell lines (RD and CTR).
+- Specifically, there is a structural break around MSC gene in all 3 patient and not present in cell line data.
+- This gene is known to be associated with RMS.
+
+```{r sjcrh-areak}
+knitr::include_graphics("/home/gdstantonlab/mxw010/Data/SPICE-C/analysis/sjcrh.png")
+```
+
+
+- No common SV betweeen RD/CTR and SJ patients data (/home/gdstantonlab/mxw010/Data/SPICE-C/hic_breakfinder/SJCRH-13758/candidate.pdf)
+
+
+## Break points with P3F binding?
+
+```{bash eval=FALSE}
+cd /gpfs0/home2/gdstantonlab/mxw010/Data/SPICE-C/analysis/PAX3-FOXO1_fusion
+ml  GCC/9.3.0  BEDTools/2.29.2
+grep '1kb' ~/Data/SPICE-C/hic_breakfinder/RH4_1kb/RH4.breaks.txt | cut -f2-5  | awk 'BEGING{OFS="\t"} {print $0, NR, "1"}' > RH4_break.bed
+
+grep '1kb' ~/Data/SPICE-C/hic_breakfinder/RH4_1kb/RH4.breaks.txt  | cut -f6-9 | awk 'BEGING{OFS="\t"} {print $0, NR, "2"}' >> RH4_break.bed
+
+bedtools sort -i RH4_break.bed > temp
+mv temp RH4_break.bed
+#61 matches
+#9 breaks have P3F binding sites at both ends
+#bedtools intersect -u -b RH4_break.bed -a /home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4_idr.bed | awk '{print $5}' | sort | uniq -c  | awk '{print $1}' | sort | uniq -c
+bedtools intersect -u -b RH4_break.bed -a /home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4_idr.bed > RH4_P3Fbound_breaks.bed
+
+
+awk '$NF==1 {print}' RH4_break.bed  > RH4_break_1.bed
+awk '$NF==2 {print}' RH4_break.bed  > RH4_break_2.bed
+awk '$NF==1 {print}' RH30_break.bed  > RH30_break_1.bed
+awk '$NF==2 {print}' RH30_break.bed  > RH30_break_2.bed
+bedtools intersect -u -b RH4_break_1.bed -a RH30_break_1.bed
+bedtools intersect -u -b RH4_break_2.bed -a RH30_break_2.bed
+bedtools intersect -u -b RH4_break_1.bed -a RH30_break_2.bed
+bedtools intersect -u -b RH4_break_2.bed -a RH30_break_1.bed
+
+cut -f2-5 ~/Data/SPICE-C/hic_breakfinder/RD/RD.breaks.txt | awk 'BEGING{OFS="\t"} {print $0, NR, "1"}' > RD_break.bed
+cut -f6-9 ~/Data/SPICE-C/hic_breakfinder/RD/RD.breaks.txt | awk 'BEGING{OFS="\t"} {print $0, NR, "2"}' >> RD_break.bed
+bedtools sort -i RD_break.bed > temp
+mv temp RD_break.bed
+
+cut -f2-5 ~/Data/SPICE-C/hic_breakfinder/CTR/CTR.breaks.txt | awk 'BEGING{OFS="\t"} {print $0, NR, "1"}' > CTR_break.bed
+cut -f6-9 ~/Data/SPICE-C/hic_breakfinder/CTR/CTR.breaks.txt | awk 'BEGING{OFS="\t"} {print $0, NR, "2"}' >> CTR_break.bed
+bedtools sort -i CTR_break.bed > temp
+mv temp CTR_break.bed
+
+awk '$NF==1 {print}' RD_break.bed  > RD_break_1.bed
+awk '$NF==2 {print}' RD_break.bed  > RD_break_2.bed
+awk '$NF==1 {print}' CTR_break.bed  > CTR_break_1.bed
+awk '$NF==2 {print}' CTR_break.bed  > CTR_break_2.bed
+bedtools intersect -u -b RD_break_1.bed -a CTR_break_1.bed
+bedtools intersect -u -b RD_break_2.bed -a CTR_break_2.bed
+bedtools intersect -u -b RD_break_1.bed -a CTR_break_2.bed
+bedtools intersect -u -b RD_break_2.bed -a CTR_break_1.bed
+```
+
+```{r}
+df <- read.table("RH4_P3Fbound_breaks.bed")
+
+flanked <- df[df[, 5] %in% names(table(df[, 5])[which(table(df[, 5]) == 2)]), ]
+flanked[order(flanked[, 5], flanked[, 6]), ]
+```
+```{bash eval=FALSE}
+cut -f2-5 ~/Data/SPICE-C/hic_breakfinder/RH30_1kb/RH30.breaks.txt | awk 'BEGING{OFS="\t"} {print $0, NR, "1"}' > RH30_break.bed
+cut -f6-9 ~/Data/SPICE-C/hic_breakfinder/RH30_1kb/RH30.breaks.txt | awk 'BEGING{OFS="\t"} {print $0, NR, "2"}' >> RH30_break.bed
+bedtools sort -i RH30_break.bed > temp
+mv temp RH30_break.bed
+
+bedtools intersect -u -b RH30_break.bed -a /home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH30.bed | awk '{print $5}' | sort | uniq -c  | awk '{print $1}' | sort | uniq -c
+```
+
+
+# RH4 expression at A-B swithch/TAD Boundary
+
+```{r getting_RH4_expression, eval=F}
+
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(dplyr)
+library(DESeq2)
+# library(EnsDb.Hsapiens.v79)
+library(biomaRt)
+library(crosstalk)
+library(apeglm)
+
+setwd("/home/gdstantonlab/mxw010/Data/GSL-BS-2619/RNA-seq/STAR")
+pval_cutoff <- 0.01
+data <- read.table("combined.txt", sep = "\t", comment = "#", header = T)
+
+y <- data[, 7:ncol(data)]
+coldata <- read.table("sample_desc", row.names = 1, header = T)
+coldata$Time <- factor(coldata$Time, levels = c("0h", "6h", "12h"))
+colnames(y) <- rownames(coldata)
+rownames(y) <- data$Geneid
+
+
+dds <- DESeqDataSetFromMatrix(
+    countData = y, colData = coldata,
+    design = ~1, ignoreRank = TRUE
+)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+
+dds <- estimateSizeFactors(dds)
+
+se <- SummarizedExperiment(log2(counts(dds, normalized = TRUE) + 1),
+    colData = colData(dds)
+)
+
+# dds <- DESeq(dds, test="LRT", reduced = ~1)
+# res_ds <- results(dds)
+
+df <- counts(dds, normalized = F) %>%
+    as.data.frame() %>%
+    dplyr::select(paste0("SEG", c(307, 308, 315, 323, 324)))
+
+df$AvgExp <- rowMeans(df)
+
+setwd("/home/gdstantonlab/mxw010/Data/SPICE-C/analysis/GeneExp")
+# write.table(df, 'RH4_expression_normalized.txt',sep="\t", quote=F, col.names=T, row.names=F)
+```
+
+
+
+```{R}
+# cd /home/gdstantonlab/mxw010/Data/SPICE-C/analysis/GeneExp"
+genes_exp <- read.table("RH4_expression_normalized.txt", header = T, sep = "\t", quote = "\"")
+S1 <- read.table("tableS1.txt", header = T)
+S1$AvgExpresison_RH4 <- df$AvgExp[match(S1$ensembl, rownames(df))]
+write.table(S1, "TableS1_with_expression.csv", sep = ",", row.names = F, col.names = T)
+
+
+S2 <- read.table("tableS2.txt", header = T, quote = "\"", sep = "\t")
+S2$AvgExpresison_RH4 <- df$AvgExp[match(S2$ensembl, rownames(df))]
+write.table(S2, "TableS2_with_expression.csv", sep = ",", row.names = F, col.names = T)
+
+# merge with depmap
+S1 <- read.csv("TableS1_with_expression.csv")
+S2 <- read.csv("TableS2_with_expression.csv")
+x <- read.csv("depmap.csv", row.names = 1, header = T)
+genes <- read.table("depmap_genes.txt", header = F)
+colnames(x) <- genes[, 1]
+
+
+filter(x, row.names(x) %in% c("ACH-001765", "ACH-000833", "ACH-001189", "ACH-000169", "ACH-001196")) %>%
+    select(S1$GeneName) %>%
+    t() %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("GeneName") %>%
+    rename(RH4 = "ACH-001765", RH30 = "ACH-000833", RD = "ACH-000169", CTR = "ACH-001196") %>%
+    relocate(GeneName, RH4, RH30, RD, CTR) %>%
+    merge(x = S1, by.x = "GeneName", by.y = "GeneName") %>%
+    write.table("S1_with_CCLE.txt", row.names = F, quote = F, col.names=F, sep="\t")
+
+filter(x, row.names(x) %in% c("ACH-001765", "ACH-000833", "ACH-001189", "ACH-000169", "ACH-001196")) %>%
+    select(intersect(S2$gene.name, colnames(x))) %>%
+    t() %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("GeneName") %>%
+    rename(RH4 = "ACH-001765", RH30 = "ACH-000833", RD = "ACH-000169", CTR = "ACH-001196") %>%
+    relocate(GeneName, RH4, RH30, RD, CTR) %>%
+    merge(x = S2, y = temp, by.x = "gene.name", by.y = "GeneName") %>%
+    write.table("S2_with_CCLE.txt", row.names = F, quote = F, col.names=F, sep="\t")
+```

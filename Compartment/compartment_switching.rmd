@@ -1,0 +1,343 @@
+---
+title: "Compartment Switching Graphic Choices"
+author: Meng Wang
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+always_allow_html: true
+output:
+    pdf_document
+---
+
+```{r loadLibrary,  include=FALSE, echo=FALSE, messages = FALSE, warnings=FALSE}
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(dplyr)
+library(hrbrthemes)
+library(gt)
+theme_set(theme_bw())
+theme_update(
+    plot.title = element_text(hjust = 0.5)
+)
+library(knitr)
+library(grid)
+library(gridExtra)
+get_legend <- function(myggplot) {
+    tmp <- ggplot_gtable(ggplot_build(myggplot))
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-aox")
+    legend <- tmp$grobs[[leg]]
+    return(legend)
+}
+library(gt)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE)
+```
+
+# Summary:
+- Goal: P3F/MYOD/K27ac association with discordant compartment.
+- Methods: Distribution of binding sites per category (A-A, A-B, B-A, B-B).
+- Problem: Compare per category or per 1000 binding sites?
+    - For K27ac and MYOD, FP is quite comparable becauase they have similar number of binding sites in FP.
+    - Normalizing by number of bins: P3F is about 1/9 binding sites of MYOD1, so it would sit lower than both (Fig1).
+    - Normalize by binding sites: fraction is really low. (Fig 2)
+    - Normalize by both: I feel like P3F is overblown. The fact that there are only 2000 or so consensus sites in FP means something.
+    I am not sure if downscaling K27ac/MYOD is the right approach. (Fig 4)
+- Additional graphical presentation choices: FP/FN as facets (Fig1-3), or Factor as facets (Fig4)?
+
+```{r}
+
+echo "cell factor AB BA AA BB sites" > switch_table_tf.txt
+
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH4/align_primary/chip/b6b42932-8417-4ffd-acfe-6c4ce74da28f/call-call_peak/shard-0/execution/SEG0134_S2_L003_R1_001_val_1.srt.nodup_x_SEG0133_S1_L003_R1_001_val_1.srt.nodup.pval0.01.500K.bfilt.narrowPeak.gz"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`zcat $bed | wc -l`
+echo "RH4-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RH30/align_primary/chip/2317294d-60c3-4998-9179-dc7da8c57608/call-call_peak/shard-0/execution/SEG0139_S7_L003_R1_001_val_1.srt.nodup_x_SEG0138_S6_L003_R1_001_val_1.srt.nodup.pval0.01.500K.narrowPeak.gz"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`zcat $bed | wc -l`
+echo "RH30-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+n1=`bedtools intersect -u -a FP-k27ac.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a FP-k27ac.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FP-k27ac.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FP-k27ac.bed -b all_neg.bed | wc -l`
+n5=`wc -l FP-k27ac.bed | awk '{print $1}'`
+echo "FP-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/RD/align_primary/chip/c28a7a00-d332-4997-bb07-59eedba9146c/call-call_peak/shard-0/execution/SEG0144_S2_L004_R1_001_val_1.nodup_x_SEG0143_S1_L004_R1_001_val_1.nodup.pval0.01.500K.narrowPeak.gz"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`zcat $bed | wc -l`
+echo "RD-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/pc-chip-seq/GSL-BS-2005/H3K27AC/SMS-CTR/align_primary/chip/3b89bbf5-421e-444a-87c5-3bbe9b11dbff/call-call_peak/shard-0/execution/SEG0149_S7_L004_R1_001_val_1.srt.nodup_x_SEG0148_S6_L004_R1_001_val_1.srt.nodup.pval0.01.500K.narrowPeak.gz"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`zcat $bed | wc -l`
+echo "CTR-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+n1=`bedtools intersect -u -a FN-k27ac.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a FN-k27ac.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FN-k27ac.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FN-k27ac.bed -b all_neg.bed | wc -l`
+n5=`wc -l FN-k27ac.bed | awk '{print $1}'`
+echo "FN-K27ac ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+#MYOD
+bed="/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH4/RH4_IDR_Conservative.bed"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RH4-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RH30/RH30_IDR_Conservative.bed"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RH30-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+
+n1=`bedtools intersect -u -a FP-MYOD.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a FP-MYOD.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FP-MYOD.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FP-MYOD.bed -b all_neg.bed | wc -l`
+n5=`wc -l FP-MYOD.bed | awk '{print $1}'`
+echo "FP-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/RD/RD_IDR_Conservative.bed"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RD-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/MYOD/GSL-BS-2483/result/file_transfer/outputs/SMS-CTR/SMS-CTR_IDR_Conservative.bed"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "CTR-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+
+n1=`bedtools intersect -u -a FN-MYOD.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a FN-MYOD.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FN-MYOD.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FN-MYOD.bed -b all_neg.bed | wc -l`
+n5=`wc -l FN-MYOD.bed | awk '{print $1}'`
+echo "FN-MYOD ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+#P3F
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH4.bed"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RH4-P3F ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+bed="/home/gdstantonlab/mxw010/Data/Ben/downsampled/data/bed/RH30.bed"
+n1=`bedtools intersect -u -a $bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a $bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a $bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a $bed -b all_neg.bed | wc -l`
+n5=`wc -l $bed | awk '{print $1}'`
+echo "RH30-P3F ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+
+n1=`bedtools intersect -u -a FP-P3F.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a FP-P3F.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a FP-P3F.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a FP-P3F.bed -b all_neg.bed | wc -l`
+n5=`wc -l FP-P3F.bed | awk '{print $1}'`
+echo "FP-P3F ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+#MYCN
+n1=`bedtools intersect -u -a MYCN_RH4.bed -b pos_to_neg.bed | wc -l`
+n2=`bedtools intersect -u -a MYCN_RH4.bed -b neg_to_pos.bed | wc -l`
+n3=`bedtools intersect -u -a MYCN_RH4.bed -b all_pos.bed | wc -l`
+n4=`bedtools intersect -u -a MYCN_RH4.bed -b all_neg.bed | wc -l`
+n5=`wc -l MYCN_RH4.bed | awk '{print $1}'`
+echo "RH4-MYCN ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+#Total
+n1=`wc -l pos_to_neg.bed | awk '{print $1}'`
+n2=`wc -l neg_to_pos.bed | awk '{print $1}'`
+n3=`wc -l all_pos.bed  | awk '{print $1}'`
+n4=`wc -l all_neg.bed  | awk '{print $1}'`
+n5=`wc -l /home/gdstantonlab/mxw010/Data/SPICE-C/RH4/Compartments/concordance/RH4_k27ac.cis.vecs.tsv | awk '{print $1}'`
+echo "Total-all ${n1} ${n2} ${n3} ${n4} ${n5}" >> switch_table_tf.txt
+
+sed -ie 's/-/ /g' switch_table_tf.txt
+
+
+
+data <- read.table("switch_table_tf.txt", header = T)
+data <- data[, -nrow(data)]
+
+x <- data
+x[, 3:7] <- t(apply(x[,-(1:2)], 1, function(y) y/y[length(y)]))
+x <- x[-nrow(x), -ncol(x)]
+
+
+x$cell <- factor(x$cell, levels = c("RH4", "RH30", "FP", "RD", "CTR", "FN"))
+x$factor <- factor(x$factor, levels = c("K27ac", "MYOD", "P3F", "MYCN"))
+df <- melt(x)
+
+df$type <- factor(df$variable, levels=c('AB','BA','AA','BB'))
+
+
+cbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+ggplot(data=df, aes(x= type , y = value, color=factor, group=factor)) +
+geom_line(size=1.5, linetype='twodash') +
+facet_wrap(vars(cell)) +
+scale_color_manual(values=cbPalette, name='Factor') +
+ylab("Percentages")
+
+x[x$cell == 'FP' | x$cell =='FN',]
+
+
+y <- melt(x[x$cell == 'FP' | x$cell =='FN',])
+
+#    cell factor         AB          BA        AA         BB
+# 3    FP  K27ac 0.02638335 0.014475337 0.6323811 0.02583711
+# 6    FN  K27ac 0.01060579 0.028862908 0.6370546 0.02474685
+# 9    FP   MYOD 0.02571519 0.018090029 0.6030185 0.03901977
+# 12   FN   MYOD 0.01441705 0.032107536 0.5698565 0.04819613
+# 15   FP    P3F 0.04588235 0.009019608 0.5819608 0.04274510
+
+#FP, P3F vs k27ac
+subset(x, cell == 'FP')
+prop.test(c(483,117),c(18307,2550))
+#0.6796078 of consensus P3F sites in those 4 categories
+#0.6990769 of consensus K27ac sites in those 4 categories
+#FN, P3F vs k27ac
+subset(data, cell == 'FN')
+
+    subset(x, cell == 'FP')[,-(5:6)] %>%
+    melt() %>%
+    ggplot(aes(x= variable , y = value, fill=factor)) +
+    geom_bar(position='dodge', stat='identity') +
+    facet_wrap(vars(cell)) +
+    scale_fill_manual(values=cbPalette, name='Factor') +
+    ylab("Percentages")
+```
+# Fig1: Normalize Per Compartment/Bin
+
+```{r per_bin}
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+data <- read.table("switch_table.txt", header = T)
+# data <- data[, -ncol(data)]
+x <- data
+x[, 3:6] <- sapply(3:6, function(i) data[, i] / data[nrow(data), i])
+# x[nrow(x),] <- data[nrow(data),]
+x$cell <- factor(x$cell, levels = c("RH4", "RH30", "FP", "RD", "CTR", "FN"))
+x$factor <- factor(x$factor, levels = c("K27ac", "MYOD", "P3F", "MYCN"))
+df <- melt(x[-nrow(x), -ncol(x)])
+
+df$se <- unlist(sqrt((df$value * (1 - df$value)) / data[nrow(data), sapply(df$variable, match, table = colnames(data))]), use.names = F)
+dodge <- position_dodge(width = 0.9)
+
+
+subset(df, (cell == "FP" | cell == "FN")) %>%
+    mutate(type = factor(variable, levels = c("AB", "BA", "AA", "BB"))) %>%
+    ggplot(aes(x = type, y = value, fill = factor)) +
+    # geom_line(size=1.5, linetype='twodash') +
+    geom_bar(position = "dodge", stat = "identity", color = "black") +
+    # geom_errorbar(aes(ymin=value-se, ymax=value+se), position=dodge, width=0.5, size=1.2) +
+    facet_wrap(vars(cell)) +
+    scale_fill_manual(values = cbPalette, name = "Factor") +
+    ylab("Percentages")
+```
+
+# Fig2: Normalize by Number of binding sites (P3F has significantly fewer)
+
+```{r per_binding}
+data <- read.table("switch_table_tf.txt", header = T)
+x <- data
+x[, 3:7] <- t(apply(x[, -(1:2)], 1, function(y) y / y[length(y)]))
+x$sites <- data$sites
+x <- x[-nrow(x), ]
+x$cell <- factor(x$cell, levels = c("RH4", "RH30", "FP", "RD", "CTR", "FN"))
+x$factor <- factor(x$factor, levels = c("K27ac", "MYOD", "P3F", "MYCN"))
+df <- melt(x[, -ncol(x)], id.vars = c("cell", "factor"))
+total <- mapply(function(a, b) {
+    data$sites[which(data$cell == a & data$factor == b)]
+}, df$cell, df$factor)
+df$se <- unlist(sqrt((df$value * (1 - df$value)) / total), use.names = F)
+dodge <- position_dodge(width = 0.9)
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+subset(df, (cell == "FP" | cell == "FN")) %>%
+    mutate(type = factor(variable, levels = c("AB", "BA", "AA", "BB"))) %>%
+    ggplot(aes(x = type, y = value, fill = factor)) +
+    # geom_line(size=1.5, linetype='twodash') +
+    geom_bar(position = "dodge", stat = "identity", color = "black") +
+    #    geom_errorbar(aes(ymin = value - se, ymax = value + se), position = dodge, width = 0.5, size = 1.2) +
+    facet_wrap(vars(cell)) +
+    scale_fill_manual(values = cbPalette, name = "Factor") +
+    ylab("Percentages")
+```
+
+# Fig3: Normalize by Per Bin Per 10000 Binding Sites
+```{r}
+data <- read.table("switch_table.txt", header = T)
+# data <- data[, -ncol(data)]
+x <- data
+x[, 3:6] <- sapply(3:6, function(i) data[, i] / data[nrow(data), i])
+
+y <- subset(x, cell == "FP" | cell == "FN")
+y[, 3:6] <- y[, 3:6] / (y$sites / 10000)
+
+ggplot(data = melt(y[, -ncol(y)]), aes(x = variable, y = value, fill = factor)) +
+    # geom_line(size=1.5, linetype='twodash') +
+    geom_bar(position = "dodge", stat = "identity", color = "black") +
+    # geom_errorbar(aes(ymin=value-se, ymax=value+se), position=dodge, width=0.5, size=1.2) +
+    facet_wrap(vars(cell)) +
+    scale_fill_manual(values = cbPalette, name = "Factor") +
+    ylab("Percentages")
+```
+
+# Fig4: Factor as Facets (compare against Fig1)
+
+```{r facets}
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+data <- read.table("switch_table.txt", header = T)
+# data <- data[, -ncol(data)]
+x <- data
+x[, 3:6] <- sapply(3:6, function(i) data[, i] / data[nrow(data), i])
+# x[nrow(x),] <- data[nrow(data),]
+x$cell <- factor(x$cell, levels = c("RH4", "RH30", "FP", "RD", "CTR", "FN"))
+x$factor <- factor(x$factor, levels = c("K27ac", "MYOD", "P3F", "MYCN"))
+df <- melt(x[-nrow(x), -ncol(x)])
+
+df$se <- unlist(sqrt((df$value * (1 - df$value)) / data[nrow(data), sapply(df$variable, match, table = colnames(data))]), use.names = F)
+dodge <- position_dodge(width = 0.9)
+
+
+subset(df, (cell == "FP" | cell == "FN")) %>%
+    mutate(type = factor(variable, levels = c("AB", "BA", "AA", "BB"))) %>%
+    ggplot(aes(x = type, y = value, fill = cell)) +
+    # geom_line(size=1.5, linetype='twodash') +
+    geom_bar(position = "dodge", stat = "identity", color = "black") +
+    # geom_errorbar(aes(ymin=value-se, ymax=value+se), position=dodge, width=0.5, size=1.2) +
+    facet_wrap(vars(factor)) +
+    scale_fill_manual(values = cbPalette, name = "Factor") +
+    ylab("Percentages")
+```

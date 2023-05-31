@@ -1,0 +1,74 @@
+---
+title: "RMS Hi-C Analysis Workflow Summary"
+author: Meng Wang
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+always_allow_html: true
+output:
+    html_document
+
+---
+<!--- adding banner
+<img src="/home/gdstantonlab/lab/lab.jpg" width = "200" height = "200" style="position:absolute;top:30px;right:50px;" />
+<style>
+p.caption {
+  font-size: 1.2em;
+}
+</style>
+-->
+
+```{r setup, eval=TRUE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE)
+# Sys.setenv("DISPLAY" = "localhost:46.0")
+# use_python("~/.conda/envs/hic/bin/python")
+# use_condaenv(condaenv = "hic", conda = "/gpfs0/export/apps/easybuild/software/Miniconda3/4.7.10/condabin/conda")
+# module load rstudio/1.4.1717 R/4.1.0
+# > getwd()
+# [1] "/gpfs0/home2/gdstantonlab/mxw010/Data/SPICE-C"
+# starting hgd server
+# library(httpgd)
+# hgd()
+```
+
+# Pre-processing
+
+- Alignments, binning and normalization are done using script `./pre-precessing/hic.sh`.
+
+<details>
+  <summary>Click for Details</summary>
+
+- Data are aligned with `bwa mem -SP5M  -t 10` (version .7.17-r1188).
+
+- QC parsed, and converted to cool format  with pairtools/cooltools.
+
+- ICE normalization applied with cooltools.
+
+</details>
+
+# Compartments
+
+- Compartments called with`cooltools call-compartments` at 100kb resolution using H3K27ac as reference track.
+
+- Compartment calls and visualization are stored in `Compartments/heatmap.sh`. Association with TFs and histones, compartment swtiching analyses are in  `Compartments/Compartment_result_summary.rmd` and `Compartments/compartment_switching.rmd`.
+
+# TADs
+
+- TADs are called with TopDom at 50kb resolution.
+
+- Data format conversion and TAD calls scripts are in `TADs/submit.sh`.
+
+- Differential TAD analyses are carried out with diffHiC R pacakge. Script uses is `TADs/diffhic.R`.
+
+# SV
+
+- SV based analyses are in 'SV/'
+
+# Version of python libraries:
+
+```{bash, eval = TRUE, include=TRUE}
+ml Miniconda3/4.9.2
+conda activate hic
+python --version
+pairtools --version
+cooltools --version
+# hicexplorer --version
+```
